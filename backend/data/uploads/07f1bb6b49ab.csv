@@ -1,0 +1,3 @@
+Cell Line	Andibody	Cell Type	Condition	Concetration (ug/ml)	Response (RU)	抑制常数	备注
+CHO01	AB023-001	CHO	Experimental	0.02	1.05	5.1	初筛
+CHO02	AB023-002	CHO	Experimental	0.04	2.30	4.8	复筛

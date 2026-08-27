@@ -1,0 +1,304 @@
+"""SQLite 持久层：结果表定义、列配置、skills、settings 全部入库。
+库文件：data/data_entry.db；首次启动自动建表并从旧 json/md 文件迁移。
+"""
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+from .config import DATA_DIR, SKILLS_DIR, SETTINGS_FILE, COLUMNS_FILE, DEFAULT_COLUMNS
+
+DB_FILE = DATA_DIR / "data_entry.db"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS result_tables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS columns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_id INTEGER NOT NULL REFERENCES result_tables(id) ON DELETE CASCADE,
+    field TEXT NOT NULL,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'text',
+    required INTEGER NOT NULL DEFAULT 0,
+    options TEXT NOT NULL DEFAULT '[]',
+    description TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS skills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    """建表 + 首次迁移旧文件数据"""
+    with get_db() as conn:
+        conn.executescript(SCHEMA)
+
+        # 迁移结果表定义（来自 columns.json）
+        if not conn.execute("SELECT 1 FROM result_tables LIMIT 1").fetchone():
+            _migrate_tables(conn)
+
+        # 迁移 skills（来自 skills/*.md）
+        if not conn.execute("SELECT 1 FROM skills LIMIT 1").fetchone():
+            _migrate_skills(conn)
+
+        # 迁移 settings（来自 settings.json）
+        if not conn.execute("SELECT 1 FROM settings WHERE key='model'").fetchone():
+            _migrate_settings(conn)
+
+
+def _migrate_tables(conn) -> None:
+    data = {}
+    if COLUMNS_FILE.exists():
+        try:
+            data = json.loads(COLUMNS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    if not data:
+        data = DEFAULT_COLUMNS
+    now = time.time()
+    for name, cols in data.items():
+        if not cols:
+            continue
+        # 旧文件里 key 是 result/registry，result 对应 Binding Assay
+        display_name = "Binding Assay" if name == "result" else name
+        cur = conn.execute(
+            "INSERT INTO result_tables (name, description, created_at) VALUES (?, ?, ?)",
+            (display_name, "", now)
+        )
+        table_id = cur.lastrowid
+        for i, c in enumerate(cols):
+            conn.execute(
+                "INSERT INTO columns (table_id, field, title, type, required, options, description, sort_order) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (table_id, c["field"], c["title"], c.get("type", "text"),
+                 1 if c.get("required") else 0,
+                 json.dumps(c.get("options", []), ensure_ascii=False),
+                 c.get("description", ""), i)
+            )
+
+
+def _migrate_skills(conn) -> None:
+    if not SKILLS_DIR.exists():
+        return
+    now = time.time()
+    for f in sorted(SKILLS_DIR.glob("*.md")):
+        content = f.read_text(encoding="utf-8")
+        name = f.stem
+        # 首行 # 标题优先
+        for line in content.splitlines():
+            if line.startswith("# "):
+                name = line[2:].strip()
+                break
+        conn.execute(
+            "INSERT INTO skills (name, content, enabled, updated_at) VALUES (?, ?, 0, ?)",
+            (name, content, now)
+        )
+
+
+def _migrate_settings(conn) -> None:
+    from .config import load_settings
+    settings = load_settings()
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        ("model", json.dumps(settings, ensure_ascii=False))
+    )
+
+
+# ===== 结果表 CRUD =====
+
+def list_tables() -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT t.id, t.name, t.description, t.created_at, COUNT(c.id) AS column_count "
+            "FROM result_tables t LEFT JOIN columns c ON c.table_id = t.id "
+            "GROUP BY t.id ORDER BY t.created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_table(table_id: int) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT id, name, description, created_at FROM result_tables WHERE id = ?", (table_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def create_table(name: str, description: str, columns: list[dict]) -> dict:
+    with get_db() as conn:
+        if conn.execute("SELECT 1 FROM result_tables WHERE name = ?", (name,)).fetchone():
+            raise ValueError(f"结果表「{name}」已存在")
+        cur = conn.execute(
+            "INSERT INTO result_tables (name, description, created_at) VALUES (?, ?, ?)",
+            (name, description or "", time.time())
+        )
+        table_id = cur.lastrowid
+        _save_columns(conn, table_id, columns)
+        return {"id": table_id, "name": name, "description": description}
+
+
+def update_table(table_id: int, name: str | None = None, description: str | None = None) -> None:
+    with get_db() as conn:
+        if name is not None:
+            dup = conn.execute("SELECT 1 FROM result_tables WHERE name = ? AND id != ?", (name, table_id)).fetchone()
+            if dup:
+                raise ValueError(f"结果表「{name}」已存在")
+            conn.execute("UPDATE result_tables SET name = ? WHERE id = ?", (name, table_id))
+        if description is not None:
+            conn.execute("UPDATE result_tables SET description = ? WHERE id = ?", (description, table_id))
+
+
+def delete_table(table_id: int) -> None:
+    with get_db() as conn:
+        conn.execute("DELETE FROM columns WHERE table_id = ?", (table_id,))
+        conn.execute("DELETE FROM result_tables WHERE id = ?", (table_id,))
+
+
+def copy_table(table_id: int, new_name: str) -> dict:
+    """复制某表的列配置为新表"""
+    src = get_table(table_id)
+    if not src:
+        raise ValueError("源表不存在")
+    cols = get_columns(table_id)
+    return create_table(new_name, src["description"], cols)
+
+
+# ===== 列配置 =====
+
+def _save_columns(conn, table_id: int, columns: list[dict]) -> None:
+    conn.execute("DELETE FROM columns WHERE table_id = ?", (table_id,))
+    for i, c in enumerate(columns):
+        conn.execute(
+            "INSERT INTO columns (table_id, field, title, type, required, options, description, sort_order) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (table_id, c["field"], c["title"], c.get("type", "text"),
+             1 if c.get("required") else 0,
+             json.dumps(c.get("options", []), ensure_ascii=False),
+             c.get("description", ""), i)
+        )
+
+
+def get_columns(table_id: int) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT field, title, type, required, options, description FROM columns "
+            "WHERE table_id = ? ORDER BY sort_order", (table_id,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["required"] = bool(d["required"])
+            try:
+                d["options"] = json.loads(d["options"])
+            except Exception:
+                d["options"] = []
+            result.append(d)
+        return result
+
+
+def save_columns(table_id: int, columns: list[dict]) -> None:
+    with get_db() as conn:
+        if not conn.execute("SELECT 1 FROM result_tables WHERE id = ?", (table_id,)).fetchone():
+            raise ValueError("结果表不存在")
+        _save_columns(conn, table_id, columns)
+
+
+# ===== Skills =====
+
+def list_skills() -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, name, enabled, updated_at FROM skills ORDER BY updated_at DESC").fetchall()
+        return [dict(r) | {"enabled": bool(r["enabled"])} for r in rows]
+
+
+def get_skill(skill_id: int) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT id, name, content, enabled FROM skills WHERE id = ?", (skill_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["enabled"] = bool(d["enabled"])
+        return d
+
+
+def get_skill_content(skill_id: int) -> str | None:
+    skill = get_skill(skill_id)
+    return skill["content"] if skill else None
+
+
+def save_skill(skill_id: int | None, name: str, content: str) -> int:
+    with get_db() as conn:
+        if skill_id:
+            conn.execute(
+                "UPDATE skills SET name = ?, content = ?, updated_at = ? WHERE id = ?",
+                (name, content, time.time(), skill_id)
+            )
+            return skill_id
+        cur = conn.execute(
+            "INSERT INTO skills (name, content, enabled, updated_at) VALUES (?, ?, 0, ?)",
+            (name, content, time.time())
+        )
+        return cur.lastrowid
+
+
+def delete_skill(skill_id: int) -> None:
+    with get_db() as conn:
+        conn.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+
+
+def set_enabled_skill(skill_id: int | None) -> None:
+    """启用某个 skill（单选），传 None 全部取消"""
+    with get_db() as conn:
+        conn.execute("UPDATE skills SET enabled = 0")
+        if skill_id is not None:
+            conn.execute("UPDATE skills SET enabled = 1 WHERE id = ?", (skill_id,))
+
+
+# ===== Settings =====
+
+def load_model_settings() -> dict:
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'model'").fetchone()
+        if row:
+            try:
+                return json.loads(row["value"])
+            except Exception:
+                pass
+    from .config import DEFAULT_SETTINGS
+    return dict(DEFAULT_SETTINGS)
+
+
+def save_model_settings(settings: dict) -> None:
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('model', ?)",
+            (json.dumps(settings, ensure_ascii=False),)
+        )

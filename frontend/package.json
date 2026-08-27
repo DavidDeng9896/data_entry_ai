@@ -1,0 +1,23 @@
+{
+  "name": "data-entry-agent-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vxe-ui/core": "^4.4.20",
+    "dom-zindex": "^1.0.7",
+    "remixicon": "^4.9.1",
+    "vue": "^3.4.0",
+    "vxe-table": "^4.6.0",
+    "xe-utils": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "vite": "^5.2.0"
+  }
+}
