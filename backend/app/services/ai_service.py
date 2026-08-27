@@ -4,6 +4,7 @@
 import base64
 import json
 import re
+import time
 
 from openai import OpenAI
 
@@ -374,23 +375,23 @@ def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | 
 def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file_content: str | None,
                      skill_content: str | None = None) -> tuple[str, list[dict]]:
     """mock 模式：模拟对话交互；有文件+Skill 时优先按 Skill 从正文抽取"""
+    # 让前端忙碌态（排队 / 立即重导）在 mock 下也有可操作窗口
+    if file_content:
+        time.sleep(1.5)
     rules = [m.content for m in messages if m.role == "user" and m.content.strip()]
     last = rules[-1] if rules else ""
     wants_recognize = any(kw in last for kw in ("识别", "导入", "提取", "解析", "填入")) or "帮我" in last
-    if file_content and wants_recognize:
+    # 有附件时，本轮发送即抽取（与「发送 / 立即重导」覆盖表格一致）
+    if file_content:
         simulated = _mock_extract_with_skill(file_content, columns, skill_content)
         if simulated:
             rows, note = simulated
-            return f"{note}。已填入 {len(rows)} 行。", rows
+            extra = f" 已按对话规则处理：{last}" if last and not wants_recognize else ""
+            return f"{note}。已填入 {len(rows)} 行。{extra}".strip(), rows
         rows = _mock_rows(columns)
         rule_note = f"，已应用你在对话中提出的 {len(rules)} 条规则" if rules else ""
         reply = f"已识别出 {len(rows)} 行数据{rule_note}（mock 模式，返回演示数据）。已填入表格，可在对话中继续补充规则后重新识别。"
         return reply, rows
-    if file_content:
-        simulated = _mock_extract_with_skill(file_content, columns, skill_content)
-        n = len(simulated[0]) if simulated else 6
-        reply = f"文件已收到（mock 模式）。需要我现在识别导入吗？也可以继续补充规则。说「识别导入」我就开始抽取（约 {n} 行）。"
-        return reply, []
     reply = f"收到：{last or '（空）'}。我会把它作为导入规则记住（mock 模式）。你可以继续补充规则，或上传文件后让我识别。"
     return reply, []
 
