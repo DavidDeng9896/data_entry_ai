@@ -250,7 +250,7 @@ def _extract_json_array(text: str) -> list[dict]:
 
 
 def _mock_rows(columns: list[ColumnDef]) -> list[dict]:
-    """mock 模式：按列类型生成演示数据，模拟 Binding Assay 场景"""
+    """mock 模式兜底：按列类型生成演示数据（无 Skill/无法从正文抽取时）"""
     samples = {
         "text": ["CHO01", "CHO02", "CHO03", "CHO04", "CHO05", "CHO06"],
         "number": ["0.02", "0.04", "0.12", "1.02", "0.32", "0.56"],
@@ -270,6 +270,81 @@ def _mock_rows(columns: list[ColumnDef]) -> list[dict]:
     return rows
 
 
+def _fill_columns(row: dict, columns: list[ColumnDef]) -> dict:
+    out = {c.field: "" for c in columns}
+    for k, v in row.items():
+        if k in out and v is not None:
+            out[k] = str(v)
+    return out
+
+
+def _mock_extract_with_skill(
+    content: str, columns: list[ColumnDef], skill_content: str | None
+) -> tuple[list[dict], str] | None:
+    """mock 下按 Skill 线索从解析正文做保守抽取；抽不到则返回 None 走兜底演示数据。"""
+    if not content or not skill_content:
+        return None
+    fields = {c.field for c in columns}
+    skill = skill_content
+
+    # --- MMS 人福：种属行 + 30min Remaining + T1/2 ---
+    if "remain30_human" in fields and ("remain30_human" in skill or "Liver Microsomes" in skill or "MMS" in skill):
+        # 在 markdown 表中找受试化合物块，直到 Diclofenac/对照
+        lines = content.splitlines()
+        row: dict = {}
+        active = False
+        for line in lines:
+            if "Diclofenac" in line and active:
+                break
+            # Compound ID 行：| HW350003A | Monkey | ... 30min ... | T1/2 |
+            if re.search(r"\|\s*HW[\w\-]+\s*\|", line):
+                m_id = re.search(r"\|\s*(HW[\w\-]+)\s*\|", line)
+                if m_id:
+                    row["cpds_id"] = m_id.group(1)
+                    active = True
+            if not active:
+                continue
+            sp = None
+            for name in ("Human", "Rat", "Mouse", "Dog", "Monkey"):
+                if re.search(rf"\|\s*{name}\s*\|", line):
+                    sp = name.lower()
+                    break
+            if not sp:
+                continue
+            nums = re.findall(r"\|\s*([0-9]+(?:\.[0-9]+)?)\s*", line)
+            # 典型列：0/5/15/30/60/-k/T1/2/CLint... → 取第4个时点(30min, 0-based index 3)与 T1/2
+            if len(nums) >= 7:
+                row[f"remain30_{sp}"] = nums[3]
+                row[f"t12_{sp}"] = nums[6]
+            elif len(nums) >= 5:
+                # 退化：尽量取靠后的数作 t12
+                row[f"t12_{sp}"] = nums[-3] if len(nums) >= 3 else nums[-1]
+        if row.get("cpds_id") and any(k.startswith("t12_") for k in row):
+            return [_fill_columns(row, columns)], "mock 模式：已按 MMS Skill 从解析正文模拟抽取（非真实 LLM）"
+
+    # --- HCT116：Compound ID + A_IC50 / R_IC50 ---
+    if "ic50_nm" in fields and ("HCT116" in skill or "A_IC50" in skill or "增殖" in skill):
+        rows = []
+        for line in content.splitlines():
+            m = re.search(
+                r"\|\s*\d+\s*\|\s*(HW[\w\-]+)\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|",
+                line,
+            )
+            if m:
+                rows.append(_fill_columns({
+                    "cpds_id": m.group(1),
+                    "ic50_nm": m.group(3),  # A_IC50
+                }, columns))
+            else:
+                m2 = re.search(r"\|\s*(HW[\w\-]+)\s*\|.*\|\s*([0-9.]+)\s*\|\s*$", line)
+                if m2 and "HW" in line:
+                    pass
+        if rows:
+            return rows, f"mock 模式：已按 HCT116 Skill 从解析正文模拟抽取 {len(rows)} 行（非真实 LLM）"
+
+    return None
+
+
 def _client(cfg: dict) -> OpenAI:
     return OpenAI(base_url=cfg["base_url"], api_key=cfg["api_key"] or "sk-empty")
 
@@ -277,6 +352,9 @@ def _client(cfg: dict) -> OpenAI:
 def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | None) -> tuple[list[dict], str]:
     settings = db.load_model_settings()
     if settings["mock"]:
+        simulated = _mock_extract_with_skill(content, columns, skill_content)
+        if simulated:
+            return simulated
         return _mock_rows(columns), "mock 模式返回演示数据（在设置中关闭 mock 并配置 API key 后走真实模型）"
 
     cfg = settings["text_model"]
@@ -291,6 +369,30 @@ def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | 
     )
     rows = _extract_json_array(resp.choices[0].message.content or "")
     return rows, "" if rows else "模型未返回有效数据，请检查内容或模型配置"
+
+
+def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file_content: str | None,
+                     skill_content: str | None = None) -> tuple[str, list[dict]]:
+    """mock 模式：模拟对话交互；有文件+Skill 时优先按 Skill 从正文抽取"""
+    rules = [m.content for m in messages if m.role == "user" and m.content.strip()]
+    last = rules[-1] if rules else ""
+    wants_recognize = any(kw in last for kw in ("识别", "导入", "提取", "解析", "填入")) or "帮我" in last
+    if file_content and wants_recognize:
+        simulated = _mock_extract_with_skill(file_content, columns, skill_content)
+        if simulated:
+            rows, note = simulated
+            return f"{note}。已填入 {len(rows)} 行。", rows
+        rows = _mock_rows(columns)
+        rule_note = f"，已应用你在对话中提出的 {len(rules)} 条规则" if rules else ""
+        reply = f"已识别出 {len(rows)} 行数据{rule_note}（mock 模式，返回演示数据）。已填入表格，可在对话中继续补充规则后重新识别。"
+        return reply, rows
+    if file_content:
+        simulated = _mock_extract_with_skill(file_content, columns, skill_content)
+        n = len(simulated[0]) if simulated else 6
+        reply = f"文件已收到（mock 模式）。需要我现在识别导入吗？也可以继续补充规则。说「识别导入」我就开始抽取（约 {n} 行）。"
+        return reply, []
+    reply = f"收到：{last or '（空）'}。我会把它作为导入规则记住（mock 模式）。你可以继续补充规则，或上传文件后让我识别。"
+    return reply, []
 
 
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
@@ -308,32 +410,13 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         msgs.append({"role": "user", "content": f"[已上传文件的解析内容]\n{file_content}"})
 
     if settings["mock"]:
-        return _mock_chat_reply(messages, columns, file_content)
+        return _mock_chat_reply(messages, columns, file_content, skill_content)
 
     cfg = settings["text_model"]
     client = _client(cfg)
     resp = client.chat.completions.create(model=cfg["model"], messages=msgs, temperature=0)
     raw = resp.choices[0].message.content or ""
     return _split_chat_reply(raw, columns)
-
-
-def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file_content: str | None) -> tuple[str, list[dict]]:
-    """mock 模式：模拟对话交互，规则随对话累积生效"""
-    rules = [m.content for m in messages if m.role == "user" and m.content.strip()]
-    last = rules[-1] if rules else ""
-    # 用户本轮要求识别：有文件就返回数据行
-    wants_recognize = any(kw in last for kw in ("识别", "导入", "提取", "解析", "填入")) or "帮我" in last
-    if file_content and wants_recognize:
-        rows = _mock_rows(columns)
-        rule_note = f"，已应用你在对话中提出的 {len(rules)} 条规则" if rules else ""
-        reply = f"已识别出 {len(rows)} 行数据{rule_note}（mock 模式，返回演示数据）。已填入表格，可在对话中继续补充规则后重新识别。"
-        return reply, rows
-    if file_content:
-        rows = _mock_rows(columns)
-        reply = f"文件已收到（mock 模式）。需要我现在识别导入吗？也可以继续补充规则。说「识别导入」我就返回 {len(rows)} 行演示数据。"
-        return reply, []
-    reply = f"收到：{last or '（空）'}。我会把它作为导入规则记住（mock 模式）。你可以继续补充规则，或上传文件后让我识别。"
-    return reply, []
 
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:
