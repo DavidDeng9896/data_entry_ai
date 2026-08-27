@@ -1,125 +1,155 @@
 <template>
-  <div class="dialog-mask" @click.self="$emit('close')">
-    <div class="dialog">
-      <div class="dialog-header">
-        <span class="title">导入结果数据</span>
-        <span class="assay-name">{{ tableName }}</span>
-        <span class="close-btn" @click="$emit('close')"><i class="ri-close-line"></i></span>
-      </div>
-
-      <div class="dialog-body">
-        <div class="toolbar">
-          <span class="tip">请批量填入需要进行导入的数据，确认后将进行导入校验。</span>
-          <div class="toolbar-right">
-            <button v-if="!chatOpen" class="btn ai-btn" @click="chatOpen = true">
-              <i class="ri-sparkling-2-line"></i> AI识别导入
-            </button>
-          </div>
+  <div class="dialog-mask" @click.self="onMaskClick">
+    <div class="workspace" :class="{ 'with-chat': chatOpen }">
+      <!-- 左侧：导入弹窗主体 -->
+      <div class="dialog">
+        <div class="dialog-header">
+          <span class="title">导入结果数据</span>
+          <span class="assay-name">{{ tableName }}</span>
+          <span class="close-btn" @click="$emit('close')"><i class="ri-close-line"></i></span>
         </div>
 
-        <!-- AI 多轮对话气泡 -->
-        <div v-if="chatOpen" class="chat-panel">
-          <div class="chat-header">
-            <span class="chat-title"><i class="ri-sparkling-2-line"></i> AI 导入助手</span>
-            <select v-model="pickedSkill" class="skill-select">
-              <option value="">不使用模板</option>
-              <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
-            </select>
-            <span class="chat-close" @click="chatOpen = false"><i class="ri-close-line"></i></span>
-          </div>
-          <div class="chat-messages" ref="chatMsgs">
-            <div v-if="!chatLog.length" class="chat-empty">
-              <i class="ri-chat-smile-2-line"></i>
-              <div>上传文件或直接描述导入规则，如「浓度单位从 mM 换算成 uM」，然后让我识别导入。</div>
-            </div>
-            <div v-for="(m, i) in chatLog" :key="i" :class="['chat-msg', m.role]">
-              <div class="msg-bubble">
-                <template v-if="m.fileChip">
-                  <i class="ri-file-text-line"></i> {{ m.content }}
-                </template>
-                <template v-else>{{ m.content }}</template>
-              </div>
-            </div>
-            <div v-if="chatThinking" class="chat-msg assistant">
-              <div class="msg-bubble thinking"><i class="ri-loader-4-line spin"></i> 思考中…</div>
+        <div class="dialog-body">
+          <div class="toolbar">
+            <span class="tip">请批量填入需要进行导入的数据，确认后将进行导入校验。可用右侧 AI 助手对话识别与修正。</span>
+            <div class="toolbar-right">
+              <button v-if="!chatOpen" class="btn ai-btn" @click="openChat">
+                <i class="ri-sparkling-2-line"></i> AI识别导入
+                <span v-if="chatThinking" class="pulse-dot" title="助手仍在执行"></span>
+                <span v-else-if="unreadDone" class="badge-dot" title="有新的识别结果"></span>
+              </button>
             </div>
           </div>
-          <div class="chat-input-row">
-            <label class="attach-btn" title="上传文件">
-              <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
-                accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md" />
-              <i class="ri-attachment-2"></i>
-            </label>
-            <input v-model="chatInput" class="chat-input" placeholder="输入规则或要求，Enter 发送"
-              @keydown.enter.exact.prevent="sendChat" :disabled="chatThinking" />
-            <button class="send-btn" @click="sendChat" :disabled="chatThinking || (!chatInput.trim() && !chatFile)">
-              <i class="ri-send-plane-fill"></i>
-            </button>
-          </div>
-        </div>
 
-        <div v-if="notice" class="notice" :class="noticeType">
-          <i :class="noticeIcon"></i> {{ notice }}
-        </div>
+          <div v-if="notice" class="notice" :class="noticeType">
+            <i :class="noticeIcon"></i> {{ notice }}
+          </div>
 
-        <vxe-table
-          ref="tableRef"
-          class="data-table"
-          border
-          show-overflow
-          keep-source
-          :height="430"
-          :data="tableData"
-          :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true }"
-          :mouse-config="{ selected: true, area: true }"
-          :keyboard-config="{ isArrow: true, isDel: true, isEnter: true, isTab: true, isEdit: true }"
-          :clip-config="{ isCopy: true, isCut: true, isPaste: true }"
-          :valid-config="{ msgMode: 'full' }"
-          :edit-rules="editRules"
-          @edit-closed="onEditClosed"
-        >
-          <vxe-column type="seq" title="" width="50" align="center" :edit-render="null"></vxe-column>
-          <vxe-column
-            v-for="col in columns"
-            :key="col.field"
-            :field="col.field"
-            :title="col.title"
-            min-width="120"
-            :edit-render="editorFor(col)"
+          <vxe-table
+            ref="tableRef"
+            class="data-table"
+            border
+            show-overflow
+            keep-source
+            :height="430"
+            :data="tableData"
+            :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true }"
+            :mouse-config="{ selected: true, area: true }"
+            :keyboard-config="{ isArrow: true, isDel: true, isEnter: true, isTab: true, isEdit: true }"
+            :clip-config="{ isCopy: true, isCut: true, isPaste: true }"
+            :valid-config="{ msgMode: 'full' }"
+            :edit-rules="editRules"
+            @edit-closed="onEditClosed"
           >
-            <template #header>
-              <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
-              <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
-            </template>
-            <template #edit="{ row }">
-              <template v-if="col.type === 'select'">
-                <select v-model="row[col.field]" class="cell-editor">
-                  <option value=""></option>
-                  <option v-for="opt in col.options" :key="opt" :value="opt">{{ opt }}</option>
-                </select>
+            <vxe-column type="seq" title="" width="50" align="center" :edit-render="null"></vxe-column>
+            <vxe-column
+              v-for="col in columns"
+              :key="col.field"
+              :field="col.field"
+              :title="col.title"
+              min-width="120"
+              :edit-render="editorFor(col)"
+            >
+              <template #header>
+                <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
+                <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
               </template>
-              <input v-else v-model="row[col.field]" class="cell-editor"
-                :type="col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : 'text'" />
-            </template>
-          </vxe-column>
-        </vxe-table>
+              <template #edit="{ row }">
+                <template v-if="col.type === 'select'">
+                  <select v-model="row[col.field]" class="cell-editor">
+                    <option value=""></option>
+                    <option v-for="opt in col.options" :key="opt" :value="opt">{{ opt }}</option>
+                  </select>
+                </template>
+                <input v-else v-model="row[col.field]" class="cell-editor"
+                  :type="col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : 'text'" />
+              </template>
+            </vxe-column>
+          </vxe-table>
 
-        <div class="table-footer">
-          <button class="btn ghost" @click="addRows(1)"><i class="ri-add-line"></i> 添加行</button>
-          <button class="btn ghost" @click="clearInvalid"><i class="ri-eraser-line"></i> 清除标红</button>
-          <span class="invalid-count" v-if="invalidCount > 0"><i class="ri-error-warning-line"></i> {{ invalidCount }} 个单元格待修正</span>
+          <div class="table-footer">
+            <button class="btn ghost" @click="addRows(1)"><i class="ri-add-line"></i> 添加行</button>
+            <button class="btn ghost" @click="clearInvalid"><i class="ri-eraser-line"></i> 清除标红</button>
+            <span class="invalid-count" v-if="invalidCount > 0"><i class="ri-error-warning-line"></i> {{ invalidCount }} 个单元格待修正</span>
+          </div>
+        </div>
+
+        <div class="dialog-footer">
+          <button class="btn" @click="$emit('close')">取消</button>
+          <button class="btn primary" @click="confirmImport"><i class="ri-check-line"></i> 确认导入</button>
         </div>
       </div>
 
-      <div class="dialog-footer">
-        <button class="btn" @click="$emit('close')">取消</button>
-        <button class="btn primary" @click="confirmImport"><i class="ri-check-line"></i> 确认导入</button>
-      </div>
+      <!-- 右侧：AI 会话侧栏（展开） -->
+      <aside v-show="chatOpen" class="chat-drawer">
+        <div class="chat-header">
+          <span class="chat-title"><i class="ri-sparkling-2-line"></i> AI 导入助手</span>
+          <select v-model="pickedSkill" class="skill-select" title="导入模板 Skill">
+            <option value="">不使用模板</option>
+            <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <button class="chat-close" type="button" title="收起助手（后台继续执行）" @click="collapseChat">
+            <i class="ri-close-line"></i>
+          </button>
+        </div>
+
+        <div class="chat-messages" ref="chatMsgs">
+          <div v-if="!chatLog.length" class="chat-empty">
+            <i class="ri-chat-smile-2-line"></i>
+            <div>上传文件或描述规则（如单位换算、过滤对照），发送后识别填入左侧表格。结果不对可继续对话让我重新导入。</div>
+          </div>
+          <div v-for="(m, i) in chatLog" :key="i" :class="['chat-msg', m.role]">
+            <div class="msg-bubble">
+              <template v-if="m.fileChip">
+                <i class="ri-file-text-line"></i> {{ m.content }}
+              </template>
+              <template v-else>{{ m.content }}</template>
+            </div>
+          </div>
+          <div v-if="chatThinking" class="chat-msg assistant">
+            <div class="msg-bubble thinking"><i class="ri-loader-4-line spin"></i> 思考中…</div>
+          </div>
+        </div>
+
+        <div class="chat-input-row">
+          <label class="attach-btn" title="上传文件">
+            <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
+              accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md" />
+            <i class="ri-attachment-2"></i>
+          </label>
+          <div v-if="chatFileId && chatFile" class="file-chip" :title="chatFile.name">
+            <i class="ri-file-text-line"></i>
+            <span class="file-chip-name">{{ chatFile.name }}</span>
+            <i class="ri-close-line file-chip-x" @click.stop="clearFile" title="移除文件"></i>
+          </div>
+          <input v-model="chatInput" class="chat-input"
+            :placeholder="chatFileId ? '继续提要求，或说「重新识别导入」' : '输入规则或要求，Enter 发送'"
+            @keydown.enter.exact.prevent="sendChat" :disabled="chatThinking" />
+          <button class="send-btn" @click="sendChat" :disabled="chatThinking || (!chatInput.trim() && !chatFileId)">
+            <i class="ri-send-plane-fill"></i>
+          </button>
+        </div>
+      </aside>
+
+      <!-- 收起后的侧边把手：可点开；思考中显示状态 -->
+      <button
+        v-if="!chatOpen && chatSessionStarted"
+        type="button"
+        class="chat-handle"
+        :class="{ busy: chatThinking, done: unreadDone }"
+        @click="openChat"
+        :title="chatThinking ? '助手执行中，点击展开' : '展开 AI 导入助手'"
+      >
+        <i class="ri-sparkling-2-line"></i>
+        <span v-if="chatThinking" class="handle-label">执行中</span>
+        <span v-else-if="unreadDone" class="handle-label">有结果</span>
+        <span v-else class="handle-label">助手</span>
+      </button>
     </div>
   </div>
 </template>
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { api } from '../api'
 
 const props = defineProps({
@@ -134,13 +164,16 @@ const tableData = ref([])
 const skills = ref([])
 
 const chatOpen = ref(false)
-const chatLog = ref([])          // [{role:'user'|'assistant', content, fileChip?}]
+const chatSessionStarted = ref(false) // 曾经打开过；收起后仍保留会话
+const chatLog = ref([])
 const chatInput = ref('')
-const chatFile = ref(null)       // 已上传文件 {file_id, filename}
+const chatFile = ref(null)
 const chatFileId = ref(null)
 const chatThinking = ref(false)
 const chatMsgs = ref(null)
 const pickedSkill = ref('')
+const unreadDone = ref(false) // 收起期间完成识别时提示
+const fileInput = ref(null)
 
 const notice = ref('')
 const noticeType = ref('info')
@@ -158,6 +191,8 @@ const noticeIcon = computed(() => ({
 onMounted(async () => {
   await loadColumns()
   skills.value = await api.listSkills()
+  const enabled = skills.value.find(s => s.enabled)
+  if (enabled) pickedSkill.value = enabled.id
   addRows(14)
 })
 
@@ -186,7 +221,7 @@ const editRules = computed(() => {
   return rules
 })
 
-function editorFor(col) {
+function editorFor() {
   return { autofocus: '.cell-editor' }
 }
 
@@ -198,11 +233,32 @@ function addRows(n) {
   }
 }
 
+function openChat() {
+  chatOpen.value = true
+  chatSessionStarted.value = true
+  unreadDone.value = false
+  nextTick(scrollChat)
+}
+
+function collapseChat() {
+  // 只收起 UI，不中断 chatThinking / 不丢会话与 file_id
+  chatOpen.value = false
+}
+
+function onMaskClick() {
+  // 点遮罩不强制关助手会话；仅关闭整个导入弹窗由 header/取消负责
+}
+
+function clearFile() {
+  chatFile.value = null
+  chatFileId.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
+
 function onFileChange(e) {
   const f = e.target.files[0]
   if (!f) return
   chatFile.value = f
-  // 立即上传拿 file_id
   api.upload(f).then(up => {
     chatFileId.value = up.file_id
     chatLog.value.push({ role: 'user', content: f.name, fileChip: true })
@@ -218,6 +274,7 @@ async function sendChat() {
   if (!text && !chatFileId.value) return
   if (chatThinking.value) return
 
+  chatSessionStarted.value = true
   if (text) {
     chatLog.value.push({ role: 'user', content: text })
     chatInput.value = ''
@@ -236,10 +293,11 @@ async function sendChat() {
     })
     chatLog.value.push({ role: 'assistant', content: res.reply })
     if (res.rows && res.rows.length) {
-      applyRows(res.rows)
-      notice.value = `AI 识别完成，填入 ${res.rows.length} 行数据`
+      applyRows(res.rows, { replace: true })
+      notice.value = `AI 识别完成，填入 ${res.rows.length} 行（可继续对话修正后重新导入）`
       noticeType.value = 'success'
       await validateAll()
+      if (!chatOpen.value) unreadDone.value = true
     }
     scrollChat()
   } catch (e) {
@@ -247,7 +305,6 @@ async function sendChat() {
     scrollChat()
   } finally {
     chatThinking.value = false
-    // 识别完成后保留 file_id，用户可继续对话调整规则后再次发送重新识别
   }
 }
 
@@ -257,7 +314,12 @@ function scrollChat() {
   }, 30)
 }
 
-function applyRows(rows) {
+/** replace=true：重新导入时清空并重填，避免叠在旧行上 */
+function applyRows(rows, { replace = true } = {}) {
+  if (replace) {
+    tableData.value = []
+    addRows(Math.max(rows.length, 14))
+  }
   let idx = tableData.value.findIndex(r => columns.value.every(c => !r[c.field]))
   if (idx === -1) { idx = tableData.value.length; addRows(rows.length) }
   for (const row of rows) {
@@ -332,23 +394,36 @@ async function confirmImport() {
 }
 </script>
 <style scoped>
-/* ===== 截图风格：纯白底、细边框、紫色AI按钮、蓝色确认按钮 ===== */
-.dialog-mask { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.12); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.dialog { width: 1080px; max-width: 96vw; background: #fff; border-radius: 8px; display: flex; flex-direction: column; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08); }
+.dialog-mask {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.12);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+  padding: 16px;
+}
+.workspace {
+  display: flex; align-items: stretch; gap: 12px; max-width: 96vw; max-height: 92vh;
+  position: relative;
+}
 
-.dialog-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; }
+.dialog {
+  width: 1080px; max-width: min(1080px, 96vw); background: #fff; border-radius: 8px;
+  display: flex; flex-direction: column; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+  min-height: 560px; max-height: 92vh;
+}
+.workspace.with-chat .dialog { width: min(920px, calc(96vw - 380px)); }
+
+.dialog-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0; }
 .title { font-size: 16px; font-weight: 600; color: #1a1a1a; }
 .assay-name { color: #999; font-size: 13px; }
 .close-btn { margin-left: auto; cursor: pointer; color: #999; font-size: 18px; display: flex; align-items: center; }
 .close-btn:hover { color: #333; }
 
-.dialog-body { padding: 14px 20px 12px; flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.dialog-body { padding: 14px 20px 12px; flex: 1; overflow: hidden; display: flex; flex-direction: column; min-height: 0; }
 
-.toolbar { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; min-height: 34px; }
-.tip { color: #b3b3b3; font-size: 13px; padding-top: 7px; }
-.toolbar-right { display: flex; align-items: flex-start; gap: 8px; }
+.toolbar { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px; min-height: 34px; gap: 12px; }
+.tip { color: #b3b3b3; font-size: 13px; padding-top: 7px; line-height: 1.5; }
+.toolbar-right { display: flex; align-items: flex-start; gap: 8px; flex-shrink: 0; }
 
-.btn { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #e5e5e5; background: #fff; border-radius: 4px; padding: 5px 12px; font-size: 13px; color: #4a4a4a; transition: all 0.12s; }
+.btn { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #e5e5e5; background: #fff; border-radius: 4px; padding: 5px 12px; font-size: 13px; color: #4a4a4a; transition: all 0.12s; position: relative; }
 .btn:hover { border-color: #c9c9c9; }
 .btn .ri { font-size: 15px; }
 .btn.primary { background: #1c62d7; border-color: #1c62d7; color: #fff; }
@@ -357,40 +432,91 @@ async function confirmImport() {
 
 .btn.ai-btn { border-color: #644bdc; color: #644bdc; background: #fff; }
 .btn.ai-btn:hover { background: #f5f2ff; }
-.btn.ai-btn .ri-sparkling-2-line { font-size: 14px; }
+.pulse-dot, .badge-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: #644bdc; margin-left: 4px;
+}
+.pulse-dot { animation: pulse 1s ease-in-out infinite; }
+.badge-dot { background: #52c41a; }
 
-/* AI 多轮对话面板 */
-.chat-panel { border: 1px solid #ececec; border-radius: 8px; margin-bottom: 10px; background: #fff; display: flex; flex-direction: column; overflow: hidden; }
-.chat-header { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid #f0f0f0; background: #faf9ff; }
-.chat-title { font-size: 13px; font-weight: 600; color: #644bdc; display: inline-flex; align-items: center; gap: 4px; }
+/* ===== 右侧 AI 抽屉 ===== */
+.chat-drawer {
+  width: 360px; flex-shrink: 0; background: #fff; border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08); display: flex; flex-direction: column;
+  overflow: hidden; border: 1px solid #ececec; min-height: 560px; max-height: 92vh;
+}
+.chat-header {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-bottom: 1px solid #f0f0f0; background: #faf9ff; flex-shrink: 0;
+}
+.chat-title { font-size: 13px; font-weight: 600; color: #644bdc; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .chat-title .ri { font-size: 14px; }
-.chat-header .skill-select { margin-left: auto; width: 160px; border: 1px solid #e5e5e5; border-radius: 4px; padding: 3px 6px; font-size: 12px; color: #555; background: #fff; outline: none; }
-.chat-close { color: #999; cursor: pointer; font-size: 16px; display: flex; align-items: center; }
-.chat-close:hover { color: #333; }
+.skill-select {
+  flex: 1; min-width: 0; border: 1px solid #e5e5e5; border-radius: 4px;
+  padding: 3px 6px; font-size: 12px; color: #555; background: #fff; outline: none;
+}
+.chat-close {
+  border: none; background: transparent; color: #999; cursor: pointer; font-size: 18px;
+  display: flex; align-items: center; padding: 2px; border-radius: 4px;
+}
+.chat-close:hover { color: #333; background: #f0f0f0; }
 
-.chat-messages { max-height: 220px; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; background: #fcfcfd; }
-.chat-empty { text-align: center; color: #b3b3b3; font-size: 12px; padding: 14px 20px; line-height: 1.7; }
-.chat-empty .ri { font-size: 26px; display: block; margin-bottom: 6px; color: #d9d3f8; }
+.chat-messages {
+  flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column;
+  gap: 10px; background: #fcfcfd; min-height: 0;
+}
+.chat-empty { text-align: center; color: #b3b3b3; font-size: 12px; padding: 24px 16px; line-height: 1.7; }
+.chat-empty .ri { font-size: 28px; display: block; margin-bottom: 8px; color: #d9d3f8; }
 .chat-msg { display: flex; }
 .chat-msg.user { justify-content: flex-end; }
-.msg-bubble { max-width: 72%; padding: 7px 12px; border-radius: 10px; font-size: 13px; line-height: 1.6; word-break: break-word; }
+.msg-bubble { max-width: 88%; padding: 7px 12px; border-radius: 10px; font-size: 13px; line-height: 1.6; word-break: break-word; }
 .chat-msg.user .msg-bubble { background: #644bdc; color: #fff; border-bottom-right-radius: 3px; }
 .chat-msg.assistant .msg-bubble { background: #fff; border: 1px solid #ececec; color: #333; border-bottom-left-radius: 3px; }
 .msg-bubble.thinking { color: #999; display: inline-flex; align-items: center; gap: 6px; }
-.msg-bubble .ri-file-text-line { margin-right: 4px; }
 
-.chat-input-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid #f0f0f0; }
-.attach-btn { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: #644bdc; background: #f0edff; cursor: pointer; font-size: 15px; flex-shrink: 0; }
+.chat-input-row {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  border-top: 1px solid #f0f0f0; flex-shrink: 0; flex-wrap: wrap;
+}
+.attach-btn {
+  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: #644bdc; background: #f0edff; cursor: pointer; font-size: 15px; flex-shrink: 0;
+}
 .attach-btn:hover { background: #e4deff; }
-.chat-input { flex: 1; border: 1px solid #e5e5e5; border-radius: 16px; padding: 6px 14px; font-size: 13px; outline: none; }
+.file-chip {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  background: #f0edff; color: #644bdc; border-radius: 12px; padding: 2px 8px; font-size: 12px;
+}
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+.file-chip-x { cursor: pointer; font-size: 14px; }
+.chat-input {
+  flex: 1; min-width: 120px; border: 1px solid #e5e5e5; border-radius: 16px;
+  padding: 6px 14px; font-size: 13px; outline: none;
+}
 .chat-input:focus { border-color: #644bdc; }
-.send-btn { width: 32px; height: 32px; border: none; background: #1c62d7; color: #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: background 0.12s; flex-shrink: 0; }
+.send-btn {
+  width: 32px; height: 32px; border: none; background: #1c62d7; color: #fff; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
 .send-btn:hover { background: #2a6fe0; }
 .send-btn:disabled { background: #b5cff2; cursor: not-allowed; }
-.send-btn .ri { font-size: 15px; }
+
+/* 收起把手 */
+.chat-handle {
+  position: absolute; right: -14px; top: 72px; transform: translateX(100%);
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  border: 1px solid #d9d3f8; background: #fff; color: #644bdc;
+  border-radius: 0 8px 8px 0; padding: 10px 8px; cursor: pointer;
+  box-shadow: 2px 2px 10px rgba(100, 75, 220, 0.12); font-size: 12px;
+}
+.chat-handle .ri { font-size: 18px; }
+.handle-label { writing-mode: vertical-rl; letter-spacing: 2px; font-size: 11px; }
+.chat-handle.busy { border-color: #644bdc; background: #faf9ff; }
+.chat-handle.busy .ri { animation: pulse 1s ease-in-out infinite; }
+.chat-handle.done { border-color: #95de64; color: #389e0d; }
 
 .spin { animation: spin 1s linear infinite; display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulse { 50% { opacity: 0.45; } }
 
 .notice { border-radius: 4px; padding: 7px 12px; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
 .notice .ri { font-size: 15px; flex-shrink: 0; }
@@ -399,27 +525,26 @@ async function confirmImport() {
 .notice.warning { background: #fffbe6; color: #d48806; }
 .notice.error { background: #fff1f0; color: #cf1322; }
 
-/* vxe-table 截图风格：白底、灰表头、细边框 */
-.data-table { flex: 1; }
+.data-table { flex: 1; min-height: 0; }
 .data-table :deep(.vxe-table--header-wrapper) { background: #fafafa; }
 .data-table :deep(.vxe-header--column) { background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px; }
 .data-table :deep(.vxe-body--column) { font-size: 13px; color: #333; }
-.data-table :deep(.vxe-cell--label) { color: #333; }
-.data-table :deep(.vxe-table--body-wrapper) { background: #fff; }
 
-/* 必填星号 + 说明 icon */
 .required-mark::after { content: ' *'; color: #e02b2b; }
 .col-info { color: #c0c0c0; margin-left: 4px; cursor: help; font-size: 13px; }
-.col-info:hover { color: #999; }
-
-/* 单元格编辑器 */
 .cell-editor { width: 100%; height: 100%; border: none; outline: none; padding: 4px 8px; font-size: 13px; background: #fff; }
 select.cell-editor { padding: 4px 4px; }
 
-/* 表格底部 */
-.table-footer { display: flex; align-items: center; gap: 10px; padding-top: 10px; }
+.table-footer { display: flex; align-items: center; gap: 10px; padding-top: 10px; flex-shrink: 0; }
 .invalid-count { color: #e02b2b; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
-.invalid-count .ri { font-size: 14px; }
 
-.dialog-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 20px; border-top: 1px solid #f0f0f0; }
+.dialog-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 20px; border-top: 1px solid #f0f0f0; flex-shrink: 0; }
+
+@media (max-width: 1100px) {
+  .workspace { flex-direction: column; align-items: center; overflow: auto; }
+  .workspace.with-chat .dialog { width: min(920px, 96vw); }
+  .chat-drawer { width: min(920px, 96vw); min-height: 360px; max-height: 50vh; }
+  .chat-handle { right: 8px; top: auto; bottom: 24px; transform: none; flex-direction: row; border-radius: 20px; writing-mode: horizontal-tb; }
+  .handle-label { writing-mode: horizontal-tb; letter-spacing: 0; }
+}
 </style>
