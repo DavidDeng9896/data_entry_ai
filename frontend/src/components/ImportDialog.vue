@@ -153,7 +153,7 @@
             @keydown="onComposerKeydown"
           />
           <div class="composer-bar">
-            <span class="composer-hint">{{ chatThinking ? 'Enter 排队' : 'Enter 发送 · Shift+Enter 换行' }}</span>
+            <span v-if="!chatThinking" class="composer-hint">Enter 发送</span>
             <div class="composer-actions">
               <label class="icon-btn attach" title="上传文件">
                 <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
@@ -674,9 +674,9 @@ async function confirmImport() {
   min-height: 64px; color: #333; background: transparent;
 }
 .composer-input::placeholder { color: #b3b3b3; }
-.composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
-.composer-hint { font-size: 11px; color: #b3b3b3; white-space: nowrap; }
-.composer-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.composer-bar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; min-height: 32px; }
+.composer-hint { font-size: 11px; color: #b3b3b3; white-space: nowrap; margin-right: auto; }
+.composer-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .btn.steer {
   border-color: #2468DB; color: #2468DB; background: #fff; border-radius: 8px; padding: 5px 10px;
 }
