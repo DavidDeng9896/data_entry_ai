@@ -1,7 +1,6 @@
 <template>
   <div class="dialog-mask" @click.self="onMaskClick">
     <div class="workspace" :class="{ 'with-chat': chatOpen }">
-      <!-- 左侧：导入弹窗主体 -->
       <div class="dialog">
         <div class="dialog-header">
           <span class="title">导入结果数据</span>
@@ -80,58 +79,112 @@
         </div>
       </div>
 
-      <!-- 右侧：AI 会话侧栏（展开） -->
       <aside v-show="chatOpen" class="chat-drawer">
         <div class="chat-header">
-          <span class="chat-title"><i class="ri-sparkling-2-line"></i> AI 导入助手</span>
+          <span class="chat-title"><i class="ri-chat-3-line"></i> AI 导入助手</span>
           <select v-model="pickedSkill" class="skill-select" title="导入模板 Skill">
             <option value="">不使用模板</option>
             <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
           </select>
-          <button class="chat-close" type="button" title="收起助手（后台继续执行）" @click="collapseChat">
+          <button class="icon-btn" type="button" title="收起助手（后台继续执行）" @click="collapseChat">
             <i class="ri-close-line"></i>
           </button>
         </div>
 
-        <div class="chat-messages" ref="chatMsgs">
-          <div v-if="!chatLog.length" class="chat-empty">
+        <div class="chat-scroll" ref="chatMsgs" data-conversation-scroll>
+          <div v-if="!chatLog.length && !chatThinking" class="chat-empty">
             <i class="ri-chat-smile-2-line"></i>
-            <div>上传文件或描述规则（如单位换算、过滤对照），发送后识别填入左侧表格。结果不对可继续对话让我重新导入。</div>
+            <div>上传文件或描述规则，发送后识别填入左侧表格。结果不对可继续对话重新导入。</div>
           </div>
-          <div v-for="(m, i) in chatLog" :key="i" :class="['chat-msg', m.role]">
-            <div class="msg-bubble">
+
+          <div v-for="(m, i) in chatLog" :key="i" :class="['node', m.role, { pending: m.pending }]">
+            <div class="node-body">
               <template v-if="m.fileChip">
                 <i class="ri-file-text-line"></i> {{ m.content }}
               </template>
               <template v-else>{{ m.content }}</template>
             </div>
+            <div v-if="m.pending" class="node-meta">排队中</div>
           </div>
-          <div v-if="chatThinking" class="chat-msg assistant">
-            <div class="msg-bubble thinking"><i class="ri-loader-4-line spin"></i> 思考中…</div>
+
+          <div v-if="chatThinking" class="node status">
+            <div class="status-row">
+              <i class="ri-loader-4-line spin"></i>
+              <span>正在识别…</span>
+              <span class="run-clock">{{ runClock }}</span>
+            </div>
           </div>
         </div>
 
-        <div class="chat-input-row">
-          <label class="attach-btn" title="上传文件">
-            <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
-              accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md" />
-            <i class="ri-attachment-2"></i>
-          </label>
-          <div v-if="chatFileId && chatFile" class="file-chip" :title="chatFile.name">
-            <i class="ri-file-text-line"></i>
-            <span class="file-chip-name">{{ chatFile.name }}</span>
-            <i class="ri-close-line file-chip-x" @click.stop="clearFile" title="移除文件"></i>
-          </div>
-          <input v-model="chatInput" class="chat-input"
-            :placeholder="chatFileId ? '继续提要求，或说「重新识别导入」' : '输入规则或要求，Enter 发送'"
-            @keydown.enter.exact.prevent="sendChat" :disabled="chatThinking" />
-          <button class="send-btn" @click="sendChat" :disabled="chatThinking || (!chatInput.trim() && !chatFileId)">
-            <i class="ri-send-plane-fill"></i>
+        <!-- Queue dock -->
+        <div v-if="chatQueue.length" class="queue-dock">
+          <button type="button" class="queue-head" @click="queueOpen = !queueOpen">
+            <i class="ri-play-list-2-line"></i>
+            <span>{{ chatQueue.length }} 条已排队</span>
+            <i :class="queueOpen ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'"></i>
           </button>
+          <ul v-if="queueOpen" class="queue-list">
+            <li v-for="(q, qi) in chatQueue" :key="q.id">
+              <span class="queue-text">{{ q.text }}</span>
+              <button type="button" class="icon-btn sm" title="移出队列" @click="removeQueued(qi)">
+                <i class="ri-close-line"></i>
+              </button>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Harness-style composer card -->
+        <div class="composer">
+          <div v-if="chatFileId && chatFile" class="composer-chips">
+            <span class="file-chip" :title="chatFile.name">
+              <i class="ri-file-text-line"></i>
+              <span class="file-chip-name">{{ chatFile.name }}</span>
+              <button type="button" class="chip-x" @click="clearFile" title="移除文件">
+                <i class="ri-close-line"></i>
+              </button>
+            </span>
+          </div>
+          <textarea
+            v-model="chatInput"
+            class="composer-input"
+            rows="3"
+            :placeholder="composerPlaceholder"
+            :disabled="false"
+            @keydown="onComposerKeydown"
+          />
+          <div class="composer-bar">
+            <span class="composer-hint">{{ chatThinking ? 'Enter 排队' : 'Enter 发送 · Shift+Enter 换行' }}</span>
+            <div class="composer-actions">
+              <label class="icon-btn attach" title="上传文件">
+                <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
+                  accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md" />
+                <i class="ri-attachment-2"></i>
+              </label>
+              <button
+                v-if="chatThinking && canSteer"
+                type="button"
+                class="btn steer"
+                title="打断当前轮，立即按本条指令重新导入"
+                @click="steerNow"
+                :disabled="!canSteer"
+              >
+                <i class="ri-skip-forward-line"></i> 立即重导
+              </button>
+              <button
+                type="button"
+                class="btn send"
+                :title="chatThinking ? '排队，等本轮结束后自动执行' : '发送'"
+                @click="sendOrQueue"
+                :disabled="!canSubmit"
+              >
+                <i class="ri-send-plane-line"></i>
+                <span>{{ chatThinking ? '排队' : '发送' }}</span>
+              </button>
+            </div>
+          </div>
         </div>
       </aside>
 
-      <!-- 收起后的侧边把手：可点开；思考中显示状态 -->
       <button
         v-if="!chatOpen && chatSessionStarted"
         type="button"
@@ -140,7 +193,7 @@
         @click="openChat"
         :title="chatThinking ? '助手执行中，点击展开' : '展开 AI 导入助手'"
       >
-        <i class="ri-sparkling-2-line"></i>
+        <i class="ri-chat-3-line"></i>
         <span v-if="chatThinking" class="handle-label">执行中</span>
         <span v-else-if="unreadDone" class="handle-label">有结果</span>
         <span v-else class="handle-label">助手</span>
@@ -149,7 +202,7 @@
   </div>
 </template>
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api'
 
 const props = defineProps({
@@ -164,7 +217,7 @@ const tableData = ref([])
 const skills = ref([])
 
 const chatOpen = ref(false)
-const chatSessionStarted = ref(false) // 曾经打开过；收起后仍保留会话
+const chatSessionStarted = ref(false)
 const chatLog = ref([])
 const chatInput = ref('')
 const chatFile = ref(null)
@@ -172,14 +225,31 @@ const chatFileId = ref(null)
 const chatThinking = ref(false)
 const chatMsgs = ref(null)
 const pickedSkill = ref('')
-const unreadDone = ref(false) // 收起期间完成识别时提示
+const unreadDone = ref(false)
 const fileInput = ref(null)
+const chatQueue = ref([])
+const queueOpen = ref(false)
+const abortCtrl = ref(null)
+const runStartedAt = ref(0)
+const runClock = ref('0:00')
+let clockTimer = null
+let turnSeq = 0
 
 const notice = ref('')
 const noticeType = ref('info')
 const invalidMap = ref(new Map())
 
 const invalidCount = computed(() => invalidMap.value.size)
+const hasDraft = computed(() => !!chatInput.value.trim())
+const canSubmit = computed(() => chatThinking.value
+  ? hasDraft.value
+  : !!(hasDraft.value || chatFileId.value))
+const canSteer = computed(() => !!(hasDraft.value || chatFileId.value || chatQueue.value.length))
+const composerPlaceholder = computed(() => {
+  if (chatThinking.value) return '本轮进行中：Enter 排队；或点「立即重导」打断并按新指令覆盖表格'
+  if (chatFileId.value) return '继续提要求，或直接发送识别导入'
+  return '输入规则或要求，Enter 发送，Shift+Enter 换行'
+})
 
 const noticeIcon = computed(() => ({
   info: 'ri-information-line',
@@ -194,6 +264,11 @@ onMounted(async () => {
   const enabled = skills.value.find(s => s.enabled)
   if (enabled) pickedSkill.value = enabled.id
   addRows(14)
+})
+
+onUnmounted(() => {
+  stopClock()
+  abortCtrl.value?.abort()
 })
 
 async function loadColumns() {
@@ -241,12 +316,26 @@ function openChat() {
 }
 
 function collapseChat() {
-  // 只收起 UI，不中断 chatThinking / 不丢会话与 file_id
   chatOpen.value = false
 }
 
-function onMaskClick() {
-  // 点遮罩不强制关助手会话；仅关闭整个导入弹窗由 header/取消负责
+function onMaskClick() {}
+
+function startClock() {
+  runStartedAt.value = Date.now()
+  runClock.value = '0:00'
+  stopClock()
+  clockTimer = setInterval(() => {
+    const s = Math.floor((Date.now() - runStartedAt.value) / 1000)
+    runClock.value = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  }, 1000)
+}
+
+function stopClock() {
+  if (clockTimer) {
+    clearInterval(clockTimer)
+    clockTimer = null
+  }
 }
 
 function clearFile() {
@@ -269,28 +358,83 @@ function onFileChange(e) {
   })
 }
 
-async function sendChat() {
-  const text = chatInput.value.trim()
-  if (!text && !chatFileId.value) return
-  if (chatThinking.value) return
+function onComposerKeydown(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    sendOrQueue()
+  }
+}
 
+function enqueueDraft() {
+  const text = chatInput.value.trim()
+  if (!text && !chatFileId.value) return false
+  if (text) {
+    chatQueue.value.push({ id: `${Date.now()}-${Math.random()}`, text })
+    chatLog.value.push({ role: 'user', content: text, pending: true })
+    chatInput.value = ''
+    queueOpen.value = true
+    scrollChat()
+  }
+  return true
+}
+
+function sendOrQueue() {
+  if (!canSubmit.value) return
   chatSessionStarted.value = true
+  if (chatThinking.value) {
+    enqueueDraft()
+    return
+  }
+  const text = chatInput.value.trim()
   if (text) {
     chatLog.value.push({ role: 'user', content: text })
     chatInput.value = ''
   }
+  runTurn()
+}
 
+function steerNow() {
+  if (!canSteer.value) return
+  chatSessionStarted.value = true
+  turnSeq += 1
+  abortCtrl.value?.abort()
+  const text = chatInput.value.trim()
+  if (text) {
+    chatLog.value.push({ role: 'user', content: text })
+    chatInput.value = ''
+  }
+  runTurn()
+}
+
+function removeQueued(index) {
+  const [removed] = chatQueue.value.splice(index, 1)
+  if (!removed) return
+  const i = chatLog.value.findIndex(m => m.pending && m.content === removed.text)
+  if (i >= 0) chatLog.value.splice(i, 1)
+}
+
+function settlePending(text) {
+  const m = chatLog.value.find(x => x.pending && x.content === text)
+  if (m) m.pending = false
+}
+
+async function runTurn() {
+  turnSeq += 1
+  const myTurn = turnSeq
+  abortCtrl.value = new AbortController()
   chatThinking.value = true
+  startClock()
   scrollChat()
   try {
     const res = await api.chat({
       messages: chatLog.value
-        .filter(m => !m.fileChip)
+        .filter(m => !m.fileChip && !m.pending)
         .map(m => ({ role: m.role, content: m.content })),
       columns: columns.value,
       skill_id: pickedSkill.value || null,
       file_id: chatFileId.value
-    })
+    }, { signal: abortCtrl.value.signal })
+    if (myTurn !== turnSeq) return
     chatLog.value.push({ role: 'assistant', content: res.reply })
     if (res.rows && res.rows.length) {
       applyRows(res.rows, { replace: true })
@@ -301,11 +445,25 @@ async function sendChat() {
     }
     scrollChat()
   } catch (e) {
+    if (e.name === 'AbortError' || e.message?.includes('abort')) return
+    if (myTurn !== turnSeq) return
     chatLog.value.push({ role: 'assistant', content: `出错了：${e.message}` })
     scrollChat()
   } finally {
-    chatThinking.value = false
+    if (myTurn === turnSeq) {
+      chatThinking.value = false
+      stopClock()
+      drainQueue()
+    }
   }
+}
+
+function drainQueue() {
+  if (chatThinking.value || !chatQueue.value.length) return
+  const next = chatQueue.value.shift()
+  if (!next) return
+  settlePending(next.text)
+  runTurn()
 }
 
 function scrollChat() {
@@ -314,7 +472,6 @@ function scrollChat() {
   }, 30)
 }
 
-/** replace=true：重新导入时清空并重填，避免叠在旧行上 */
 function applyRows(rows, { replace = true } = {}) {
   if (replace) {
     tableData.value = []
@@ -409,7 +566,7 @@ async function confirmImport() {
   display: flex; flex-direction: column; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
   min-height: 560px; max-height: 92vh;
 }
-.workspace.with-chat .dialog { width: min(920px, calc(96vw - 380px)); }
+.workspace.with-chat .dialog { width: min(900px, calc(96vw - 400px)); }
 
 .dialog-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0; }
 .title { font-size: 16px; font-weight: 600; color: #1a1a1a; }
@@ -426,91 +583,121 @@ async function confirmImport() {
 .btn { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #e5e5e5; background: #fff; border-radius: 4px; padding: 5px 12px; font-size: 13px; color: #4a4a4a; transition: all 0.12s; position: relative; }
 .btn:hover { border-color: #c9c9c9; }
 .btn .ri { font-size: 15px; }
-.btn.primary { background: #1c62d7; border-color: #1c62d7; color: #fff; }
-.btn.primary:hover { background: #2a6fe0; }
+.btn.primary { background: #2468DB; border-color: #2468DB; color: #fff; }
+.btn.primary:hover { background: #1d5bc4; }
 .btn.ghost { color: #666; }
 
-.btn.ai-btn { border-color: #644bdc; color: #644bdc; background: #fff; }
-.btn.ai-btn:hover { background: #f5f2ff; }
+.btn.ai-btn { border-color: #2468DB; color: #2468DB; background: #fff; }
+.btn.ai-btn:hover { background: #eef4fd; }
 .pulse-dot, .badge-dot {
-  width: 8px; height: 8px; border-radius: 50%; background: #644bdc; margin-left: 4px;
+  width: 8px; height: 8px; border-radius: 50%; background: #2468DB; margin-left: 4px;
 }
 .pulse-dot { animation: pulse 1s ease-in-out infinite; }
 .badge-dot { background: #52c41a; }
 
-/* ===== 右侧 AI 抽屉 ===== */
 .chat-drawer {
-  width: 360px; flex-shrink: 0; background: #fff; border-radius: 8px;
+  width: 380px; flex-shrink: 0; background: #fff; border-radius: 8px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08); display: flex; flex-direction: column;
   overflow: hidden; border: 1px solid #ececec; min-height: 560px; max-height: 92vh;
 }
 .chat-header {
   display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-  border-bottom: 1px solid #f0f0f0; background: #faf9ff; flex-shrink: 0;
+  border-bottom: 1px solid #f0f0f0; background: #fff; flex-shrink: 0;
 }
-.chat-title { font-size: 13px; font-weight: 600; color: #644bdc; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.chat-title .ri { font-size: 14px; }
+.chat-title { font-size: 13px; font-weight: 600; color: #2468DB; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.chat-title .ri { font-size: 16px; }
 .skill-select {
   flex: 1; min-width: 0; border: 1px solid #e5e5e5; border-radius: 4px;
   padding: 3px 6px; font-size: 12px; color: #555; background: #fff; outline: none;
 }
-.chat-close {
-  border: none; background: transparent; color: #999; cursor: pointer; font-size: 18px;
-  display: flex; align-items: center; padding: 2px; border-radius: 4px;
+.skill-select:focus { border-color: #2468DB; }
+.icon-btn {
+  border: none; background: transparent; color: #888; cursor: pointer;
+  width: 28px; height: 28px; border-radius: 6px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 16px;
 }
-.chat-close:hover { color: #333; background: #f0f0f0; }
+.icon-btn:hover { color: #2468DB; background: #eef4fd; }
+.icon-btn.sm { width: 22px; height: 22px; font-size: 14px; }
+.icon-btn.attach { color: #2468DB; }
 
-.chat-messages {
-  flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column;
-  gap: 10px; background: #fcfcfd; min-height: 0;
+.chat-scroll {
+  flex: 1; overflow-y: auto; padding: 14px 14px 8px; display: flex; flex-direction: column;
+  gap: 10px; background: #fafbfc; min-height: 0; scrollbar-gutter: stable;
 }
-.chat-empty { text-align: center; color: #b3b3b3; font-size: 12px; padding: 24px 16px; line-height: 1.7; }
-.chat-empty .ri { font-size: 28px; display: block; margin-bottom: 8px; color: #d9d3f8; }
-.chat-msg { display: flex; }
-.chat-msg.user { justify-content: flex-end; }
-.msg-bubble { max-width: 88%; padding: 7px 12px; border-radius: 10px; font-size: 13px; line-height: 1.6; word-break: break-word; }
-.chat-msg.user .msg-bubble { background: #644bdc; color: #fff; border-bottom-right-radius: 3px; }
-.chat-msg.assistant .msg-bubble { background: #fff; border: 1px solid #ececec; color: #333; border-bottom-left-radius: 3px; }
-.msg-bubble.thinking { color: #999; display: inline-flex; align-items: center; gap: 6px; }
+.chat-empty { text-align: center; color: #b3b3b3; font-size: 12px; padding: 28px 16px; line-height: 1.7; }
+.chat-empty .ri { font-size: 28px; display: block; margin-bottom: 8px; color: #bcd2f5; }
 
-.chat-input-row {
-  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-  border-top: 1px solid #f0f0f0; flex-shrink: 0; flex-wrap: wrap;
+.node { display: flex; flex-direction: column; max-width: 92%; }
+.node.user { align-self: flex-end; align-items: flex-end; }
+.node.assistant, .node.status { align-self: flex-start; }
+.node-body {
+  padding: 8px 12px; border-radius: 12px; font-size: 13px; line-height: 1.65; word-break: break-word;
 }
-.attach-btn {
-  width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
-  border-radius: 50%; color: #644bdc; background: #f0edff; cursor: pointer; font-size: 15px; flex-shrink: 0;
+.node.user .node-body { background: #2468DB; color: #fff; border-bottom-right-radius: 4px; }
+.node.user.pending .node-body { background: #9bb8ea; }
+.node.assistant .node-body { background: #fff; border: 1px solid #ececec; color: #333; border-bottom-left-radius: 4px; }
+.node-meta { font-size: 11px; color: #8aa4d4; margin-top: 3px; }
+.status-row {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #5b7db8;
+  background: #eef4fd; border-radius: 8px; padding: 6px 10px;
 }
-.attach-btn:hover { background: #e4deff; }
+.run-clock { font-variant-numeric: tabular-nums; color: #8aa4d4; }
+
+.queue-dock { border-top: 1px solid #f0f0f0; background: #fff; flex-shrink: 0; }
+.queue-head {
+  width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  border: none; background: transparent; color: #2468DB; font-size: 12px; cursor: pointer;
+}
+.queue-head:hover { background: #eef4fd; }
+.queue-list { list-style: none; padding: 0 8px 8px; margin: 0; }
+.queue-list li {
+  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
+  font-size: 12px; color: #555; border-radius: 4px;
+}
+.queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.composer {
+  margin: 8px 10px 10px; border: 1px solid #e5e5e5; border-radius: 14px;
+  background: #fff; padding: 10px 10px 8px; flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(36, 104, 219, 0.06);
+}
+.composer:focus-within { border-color: #2468DB; }
+.composer-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
-  background: #f0edff; color: #644bdc; border-radius: 12px; padding: 2px 8px; font-size: 12px;
+  background: #eef4fd; color: #2468DB; border-radius: 8px; padding: 3px 8px; font-size: 12px;
 }
-.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
-.file-chip-x { cursor: pointer; font-size: 14px; }
-.chat-input {
-  flex: 1; min-width: 120px; border: 1px solid #e5e5e5; border-radius: 16px;
-  padding: 6px 14px; font-size: 13px; outline: none;
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.chip-x { border: none; background: transparent; color: #2468DB; cursor: pointer; display: inline-flex; padding: 0; }
+.composer-input {
+  width: 100%; border: none; outline: none; resize: none; font-size: 13px; line-height: 1.55;
+  min-height: 64px; color: #333; background: transparent;
 }
-.chat-input:focus { border-color: #644bdc; }
-.send-btn {
-  width: 32px; height: 32px; border: none; background: #1c62d7; color: #fff; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+.composer-input::placeholder { color: #b3b3b3; }
+.composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.composer-hint { font-size: 11px; color: #b3b3b3; white-space: nowrap; }
+.composer-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.btn.steer {
+  border-color: #2468DB; color: #2468DB; background: #fff; border-radius: 8px; padding: 5px 10px;
 }
-.send-btn:hover { background: #2a6fe0; }
-.send-btn:disabled { background: #b5cff2; cursor: not-allowed; }
+.btn.steer:hover { background: #eef4fd; }
+.btn.steer:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.send {
+  background: #2468DB; border-color: #2468DB; color: #fff; border-radius: 8px; padding: 5px 12px;
+}
+.btn.send:hover { background: #1d5bc4; }
+.btn.send:disabled { background: #9bb8ea; border-color: #9bb8ea; cursor: not-allowed; }
 
-/* 收起把手 */
 .chat-handle {
   position: absolute; right: -14px; top: 72px; transform: translateX(100%);
   display: flex; flex-direction: column; align-items: center; gap: 4px;
-  border: 1px solid #d9d3f8; background: #fff; color: #644bdc;
+  border: 1px solid #c5d8f7; background: #fff; color: #2468DB;
   border-radius: 0 8px 8px 0; padding: 10px 8px; cursor: pointer;
-  box-shadow: 2px 2px 10px rgba(100, 75, 220, 0.12); font-size: 12px;
+  box-shadow: 2px 2px 10px rgba(36, 104, 219, 0.12); font-size: 12px;
 }
 .chat-handle .ri { font-size: 18px; }
 .handle-label { writing-mode: vertical-rl; letter-spacing: 2px; font-size: 11px; }
-.chat-handle.busy { border-color: #644bdc; background: #faf9ff; }
+.chat-handle.busy { border-color: #2468DB; background: #eef4fd; }
 .chat-handle.busy .ri { animation: pulse 1s ease-in-out infinite; }
 .chat-handle.done { border-color: #95de64; color: #389e0d; }
 
@@ -520,7 +707,7 @@ async function confirmImport() {
 
 .notice { border-radius: 4px; padding: 7px 12px; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
 .notice .ri { font-size: 15px; flex-shrink: 0; }
-.notice.info { background: #f0f5ff; color: #2f54eb; }
+.notice.info { background: #eef4fd; color: #2468DB; }
 .notice.success { background: #f6ffed; color: #389e0d; }
 .notice.warning { background: #fffbe6; color: #d48806; }
 .notice.error { background: #fff1f0; color: #cf1322; }
@@ -544,7 +731,7 @@ select.cell-editor { padding: 4px 4px; }
   .workspace { flex-direction: column; align-items: center; overflow: auto; }
   .workspace.with-chat .dialog { width: min(920px, 96vw); }
   .chat-drawer { width: min(920px, 96vw); min-height: 360px; max-height: 50vh; }
-  .chat-handle { right: 8px; top: auto; bottom: 24px; transform: none; flex-direction: row; border-radius: 20px; writing-mode: horizontal-tb; }
+  .chat-handle { right: 8px; top: auto; bottom: 24px; transform: none; flex-direction: row; border-radius: 20px; }
   .handle-label { writing-mode: horizontal-tb; letter-spacing: 0; }
 }
 </style>

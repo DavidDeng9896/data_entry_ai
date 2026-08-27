@@ -46,5 +46,9 @@ export const api = {
     return req('/recognize/upload', { method: 'POST', body: fd })
   },
   recognize: (payload) => req('/recognize/run', { method: 'POST', body: JSON.stringify(payload) }),
-  chat: (payload) => req('/recognize/chat', { method: 'POST', body: JSON.stringify(payload) })
+  chat: (payload, extra = {}) => req('/recognize/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    ...extra,
+  })
 }

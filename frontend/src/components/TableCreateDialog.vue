@@ -137,7 +137,7 @@ async function create() {
 .meta-field.desc { flex: 1; }
 .req { color: #e02b2b; }
 .inp { width: 100%; border: 1px solid #e5e5e5; border-radius: 4px; padding: 6px 10px; font-size: 13px; }
-.inp:focus { outline: none; border-color: #644bdc; }
+.inp:focus { outline: none; border-color: #2468DB; }
 .meta-field .inp { width: 320px; }
 .meta-field.desc .inp { width: 100%; }
 
@@ -150,8 +150,8 @@ async function create() {
 
 .quick-add { display: flex; gap: 8px; margin-top: 10px; }
 .copy-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; padding: 10px; background: #fafafa; border-radius: 4px; }
-.copy-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: #644bdc; border: 1px solid #d9d3f8; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
-.copy-chip:hover { background: #f5f2ff; }
+.copy-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: #2468DB; border: 1px solid #c5d8f7; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+.copy-chip:hover { background: #eef4fd; }
 .copy-chip .ri { font-size: 13px; }
 
 .panel-footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid #f0f0f0; }
