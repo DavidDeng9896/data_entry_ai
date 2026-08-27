@@ -1,12 +1,9 @@
 """AI 识别：把解析后的文件内容 + 表头定义 + 可选 skill 规则 → OpenAI 兼容接口 → 结构化行数据。
 支持文本模型（Excel/CSV/PDF）和视觉模型（图片扫描件）。mock 模式返回演示数据。
-
-基线提示词与 doc/AI_data_import/baseline-system-prompt.md 保持同步。
 """
 import base64
 import json
 import re
-from pathlib import Path
 
 from openai import OpenAI
 
@@ -14,13 +11,7 @@ from .. import database as db
 from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 
-# 仓库根目录下的基线文稿；缺失时回退到下方内嵌副本
-_BASELINE_DOC = (
-    Path(__file__).resolve().parents[3] / "doc" / "AI_data_import" / "baseline-system-prompt.md"
-)
-
-# 与 doc/AI_data_import/baseline-system-prompt.md 正文同步（去掉文首元说明）
-_BASELINE_PROMPT_FALLBACK = """# 导入识别基线
+_BASELINE_PROMPT = """# 导入识别基线
 
 ## 1. 角色与任务
 
@@ -199,21 +190,6 @@ _OUTPUT_CHAT = """## 本次输出协议（多轮对话）
 """
 
 
-def _load_baseline_prompt() -> str:
-    """优先读仓库内基线 md（跳过文首标题与引用说明），否则用内嵌副本。"""
-    try:
-        if _BASELINE_DOC.is_file():
-            text = _BASELINE_DOC.read_text(encoding="utf-8")
-            # 去掉首个 # 标题行与紧随的 blockquote 元说明，保留从「## 1.」起的正文
-            idx = text.find("## 1.")
-            if idx != -1:
-                return text[idx:].strip()
-            return text.strip()
-    except OSError:
-        pass
-    return _BASELINE_PROMPT_FALLBACK.strip()
-
-
 def _columns_prompt(columns: list[ColumnDef]) -> str:
     lines = []
     for c in columns:
@@ -246,7 +222,7 @@ def _build_system_prompt(
     """组装 system prompt：基线 + 目标列 + 输出协议 + 可选 Skill。"""
     output = _OUTPUT_CHAT if mode == "chat" else _OUTPUT_RECOGNIZE
     return (
-        f"{_load_baseline_prompt()}\n\n"
+        f"{_BASELINE_PROMPT.strip()}\n\n"
         f"## 当前目标结果表列定义\n"
         f"{_columns_prompt(columns)}\n\n"
         f"{output}"
