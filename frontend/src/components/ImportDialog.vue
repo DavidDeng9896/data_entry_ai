@@ -679,11 +679,13 @@ async function confirmImport() {
 .composer-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .btn.steer {
   border-color: #2468DB; color: #2468DB; background: #fff; border-radius: 8px; padding: 5px 10px;
+  white-space: nowrap;
 }
 .btn.steer:hover { background: #eef4fd; }
 .btn.steer:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn.send {
   background: #2468DB; border-color: #2468DB; color: #fff; border-radius: 8px; padding: 5px 12px;
+  white-space: nowrap;
 }
 .btn.send:hover { background: #1d5bc4; }
 .btn.send:disabled { background: #9bb8ea; border-color: #9bb8ea; cursor: not-allowed; }
