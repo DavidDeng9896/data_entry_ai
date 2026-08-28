@@ -8,6 +8,33 @@ from ..services import file_parser, ai_service
 router = APIRouter(prefix="/api/recognize", tags=["recognize"])
 
 
+def _resolve_file_ids(req: ChatRequest) -> list[str]:
+    ids: list[str] = []
+    if req.file_id:
+        ids.append(req.file_id)
+    for fid in req.file_ids or []:
+        if fid and fid not in ids:
+            ids.append(fid)
+    return ids
+
+
+def _load_files_content(file_ids: list[str]) -> str | None:
+    if not file_ids:
+        return None
+    chunks: list[str] = []
+    for fid in file_ids:
+        try:
+            if file_parser.is_image(fid):
+                chunks.append(f"### {fid}\n（已上传图片，当前以文本模式处理）")
+                continue
+            text = file_parser.parse_to_text(fid)
+            if text.strip():
+                chunks.append(f"### {fid}\n{text}")
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+    return "\n\n---\n\n".join(chunks) if chunks else None
+
+
 @router.post("/upload")
 async def upload(file: UploadFile):
     content = await file.read()
@@ -52,15 +79,7 @@ def chat(req: ChatRequest):
         if content:
             skill_content = content
 
-    file_content = None
-    if req.file_id:
-        try:
-            if file_parser.is_image(req.file_id):
-                file_content = "（已上传图片文件，图片识别需在设置中配置视觉模型，当前对话先以文本方式处理）"
-            else:
-                file_content = file_parser.parse_to_text(req.file_id)
-        except FileNotFoundError as e:
-            raise HTTPException(404, str(e))
+    file_content = _load_files_content(_resolve_file_ids(req))
 
     try:
         reply, rows = ai_service.chat(req.messages, req.columns, skill_content, file_content)

@@ -28,7 +28,7 @@
             <vxe-table
               ref="tableRef"
               class="data-table"
-              border
+              border="full"
               keep-source
               height="100%"
               min-height="240"
@@ -114,7 +114,7 @@
         <div class="chat-scroll" ref="chatMsgs" data-conversation-scroll>
           <div v-if="!chatLog.length && !chatThinking" class="chat-empty">
             <div class="chat-empty-title">描述规则或上传文件</div>
-            <div class="chat-empty-desc">发送后识别并填入左侧表格；可在下方切换 Skill 模板。</div>
+            <div class="chat-empty-desc">点击左上角上传附件（可多选），或输入规则后发送识别。</div>
           </div>
 
           <article
@@ -150,14 +150,36 @@
         </div>
 
         <div class="composer">
-          <div v-if="chatFileId && chatFile" class="composer-chips">
-            <span class="file-chip" :title="chatFile.name">
-              <i class="ri-file-text-line"></i>
-              <span class="file-chip-name">{{ chatFile.name }}</span>
-              <button type="button" class="chip-x" @click="clearFile" title="移除">
-                <i class="ri-close-line"></i>
-              </button>
-            </span>
+          <div class="composer-attach-row">
+            <label class="upload-btn" title="上传一个或多个附件">
+              <input
+                type="file"
+                ref="fileInput"
+                class="upload-input"
+                multiple
+                accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md"
+                @change="onFileChange"
+              />
+              <i class="ri-upload-cloud-2-line"></i>
+              <span>上传附件</span>
+            </label>
+            <div v-if="chatAttachments.length" class="composer-chips">
+              <span
+                v-for="att in chatAttachments"
+                :key="att.localId"
+                class="file-chip"
+                :class="{ uploading: att.uploading, error: att.error }"
+                :title="att.error || att.name"
+              >
+                <i v-if="att.uploading" class="ri-loader-4-line spin"></i>
+                <i v-else-if="att.error" class="ri-error-warning-line"></i>
+                <i v-else class="ri-file-text-line"></i>
+                <span class="file-chip-name">{{ att.name }}</span>
+                <button type="button" class="chip-x" @click="removeAttachment(att.localId)" title="移除">
+                  <i class="ri-close-line"></i>
+                </button>
+              </span>
+            </div>
           </div>
           <textarea
             v-model="chatInput"
@@ -176,11 +198,6 @@
               <i class="ri-arrow-down-s-line skill-caret"></i>
             </label>
             <div class="composer-actions">
-              <label class="icon-btn attach" title="上传文件">
-                <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
-                  accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md" />
-                <i class="ri-attachment-2"></i>
-              </label>
               <button
                 v-if="chatThinking && canSteer"
                 type="button"
@@ -247,8 +264,7 @@ const chatOpen = ref(false)
 const chatSessionStarted = ref(false)
 const chatLog = ref([])
 const chatInput = ref('')
-const chatFile = ref(null)
-const chatFileId = ref(null)
+const chatAttachments = ref([])
 const chatThinking = ref(false)
 const chatMsgs = ref(null)
 const pickedSkill = ref('')
@@ -291,14 +307,19 @@ const menuConfig = {
   }
 }
 const hasDraft = computed(() => !!chatInput.value.trim())
-const canSubmit = computed(() => chatThinking.value
-  ? hasDraft.value
-  : !!(hasDraft.value || chatFileId.value))
-const canSteer = computed(() => !!(hasDraft.value || chatFileId.value || chatQueue.value.length))
+const readyFileIds = computed(() =>
+  chatAttachments.value.filter(a => a.fileId && !a.uploading && !a.error).map(a => a.fileId))
+const hasReadyFiles = computed(() => readyFileIds.value.length > 0)
+const isUploadingFiles = computed(() => chatAttachments.value.some(a => a.uploading))
+const canSubmit = computed(() => {
+  if (isUploadingFiles.value) return false
+  return chatThinking.value ? hasDraft.value : !!(hasDraft.value || hasReadyFiles.value)
+})
+const canSteer = computed(() => !!(hasDraft.value || hasReadyFiles.value || chatQueue.value.length))
 const composerPlaceholder = computed(() => {
   if (chatThinking.value) return '识别中… Enter 排队，或点「立即重导」打断'
-  if (chatFileId.value) return '补充要求后发送；将按当前 Skill 识别导入'
-  return '描述导入规则或要求，Enter 发送，Shift+Enter 换行'
+  if (hasReadyFiles.value) return '可补充要求后发送；将按当前 Skill 识别全部附件'
+  return '上传附件或描述规则，Enter 发送，Shift+Enter 换行'
 })
 
 const noticeIcon = computed(() => ({
@@ -523,24 +544,44 @@ function stopClock() {
   }
 }
 
-function clearFile() {
-  chatFile.value = null
-  chatFileId.value = null
-  if (fileInput.value) fileInput.value.value = ''
+function removeAttachment(localId) {
+  chatAttachments.value = chatAttachments.value.filter(a => a.localId !== localId)
+  if (!chatAttachments.value.length && fileInput.value) fileInput.value.value = ''
 }
 
-function onFileChange(e) {
-  const f = e.target.files[0]
-  if (!f) return
-  chatFile.value = f
-  api.upload(f).then(up => {
-    chatFileId.value = up.file_id
-    chatLog.value.push({ role: 'user', content: f.name, fileChip: true })
-    scrollChat()
-  }).catch(err => {
-    notice.value = `文件上传失败：${err.message}`
-    noticeType.value = 'error'
-  })
+async function onFileChange(e) {
+  const files = Array.from(e.target.files || [])
+  if (!files.length) return
+  if (fileInput.value) fileInput.value.value = ''
+  for (const f of files) {
+    const localId = `${Date.now()}-${Math.random()}`
+    const item = { localId, name: f.name, fileId: null, uploading: true, error: null }
+    chatAttachments.value.push(item)
+    try {
+      const up = await api.upload(f)
+      const idx = chatAttachments.value.findIndex(a => a.localId === localId)
+      if (idx >= 0) {
+        chatAttachments.value[idx] = { ...chatAttachments.value[idx], fileId: up.file_id, uploading: false }
+      }
+    } catch (err) {
+      const idx = chatAttachments.value.findIndex(a => a.localId === localId)
+      if (idx >= 0) {
+        chatAttachments.value[idx] = {
+          ...chatAttachments.value[idx],
+          uploading: false,
+          error: err.message || '上传失败'
+        }
+      }
+    }
+  }
+}
+
+function pushAttachmentBubbleIfNeeded() {
+  const names = chatAttachments.value
+    .filter(a => a.fileId && !a.error)
+    .map(a => a.name)
+  if (!names.length) return
+  chatLog.value.push({ role: 'user', content: names.join('、'), fileChip: true })
 }
 
 function onComposerKeydown(e) {
@@ -552,7 +593,7 @@ function onComposerKeydown(e) {
 
 function enqueueDraft() {
   const text = chatInput.value.trim()
-  if (!text && !chatFileId.value) return false
+  if (!text && !hasReadyFiles.value) return false
   if (text) {
     chatQueue.value.push({ id: `${Date.now()}-${Math.random()}`, text })
     chatLog.value.push({ role: 'user', content: text, pending: true })
@@ -574,6 +615,8 @@ function sendOrQueue() {
   if (text) {
     chatLog.value.push({ role: 'user', content: text })
     chatInput.value = ''
+  } else {
+    pushAttachmentBubbleIfNeeded()
   }
   runTurn()
 }
@@ -587,6 +630,8 @@ function steerNow() {
   if (text) {
     chatLog.value.push({ role: 'user', content: text })
     chatInput.value = ''
+  } else {
+    pushAttachmentBubbleIfNeeded()
   }
   runTurn()
 }
@@ -617,7 +662,7 @@ async function runTurn() {
         .map(m => ({ role: m.role, content: m.content })),
       columns: columns.value,
       skill_id: pickedSkill.value || null,
-      file_id: chatFileId.value
+      file_ids: readyFileIds.value
     }, { signal: abortCtrl.value.signal })
     if (myTurn !== turnSeq) return
     chatLog.value.push({ role: 'assistant', content: res.reply })
@@ -854,12 +899,27 @@ async function confirmImport() {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 .composer:focus-within { border-color: #b8ccf5; box-shadow: 0 0 0 3px rgba(36, 104, 219, 0.08); }
-.composer-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.composer-attach-row {
+  display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px dashed #e8eaed;
+}
+.upload-input { display: none; }
+.upload-btn {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  height: 34px; padding: 0 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid #c5d8f7; background: #eef4fd; color: #2468DB;
+  font-size: 13px; font-weight: 500; transition: all 0.12s;
+}
+.upload-btn:hover { background: #dfeafb; border-color: #9bb8ea; }
+.upload-btn .ri { font-size: 17px; }
+.composer-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   background: #f3f6fb; color: #2b4f8f; border: 1px solid #e3ebf7;
   border-radius: 8px; padding: 4px 8px; font-size: 12px;
 }
+.file-chip.uploading { opacity: 0.85; border-style: dashed; }
+.file-chip.error { color: #cf1322; background: #fff1f0; border-color: #ffccc7; }
 .file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
 .chip-x { border: none; background: transparent; color: #5f7db8; cursor: pointer; display: inline-flex; padding: 0; }
 .composer-input {
@@ -922,11 +982,17 @@ async function confirmImport() {
 .notice.error { background: #fff1f0; color: #cf1322; }
 
 .data-table { height: 100%; }
-.table-wrap { flex: 1; min-height: 0; }
+.table-wrap { flex: 1; min-height: 0; border: 1px solid #e8eaec; border-radius: 4px; overflow: hidden; }
 .data-table :deep(.vxe-table--header-wrapper) { background: #fafafa; }
-.data-table :deep(.vxe-header--column) { background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px; text-align: left !important; }
+.data-table :deep(.vxe-table--border-line) { border-color: #e8eaec !important; }
+.data-table :deep(.vxe-header--column) {
+  background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px;
+  text-align: left !important; border-color: #e8eaec !important;
+}
 .data-table :deep(.vxe-header--column .vxe-cell) { justify-content: flex-start !important; }
-.data-table :deep(.vxe-body--column) { font-size: 13px; color: #333; text-align: left !important; }
+.data-table :deep(.vxe-body--column) {
+  font-size: 13px; color: #333; text-align: left !important; border-color: #e8eaec !important;
+}
 .data-table :deep(.vxe-body--column .vxe-cell) { justify-content: flex-start !important; }
 .data-table :deep(.cell-invalid),
 .data-table :deep(.col--valid-error) { background-color: #ffe9e8 !important; color: #e02b2b; }

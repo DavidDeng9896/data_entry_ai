@@ -57,7 +57,8 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]      # 完整对话历史（多轮）
     columns: list[ColumnDef]         # 当前表头
     skill_id: Optional[int] = None   # 可选 skill 模板 id
-    file_id: Optional[str] = None    # 已上传的文件 id（识别上下文）
+    file_id: Optional[str] = None    # 兼容单文件
+    file_ids: list[str] = []         # 多文件（与 file_id 合并去重）
 
 
 class ChatResponse(BaseModel):
