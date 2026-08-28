@@ -96,7 +96,7 @@ async function save() {
 .col-table th { text-align: left; font-weight: 500; color: #666; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid #eee; background: #fafafa; }
 .col-table td { padding: 6px 8px; border-bottom: 1px solid #f5f5f5; }
 .inp { width: 100%; border: 1px solid #e5e5e5; border-radius: 4px; padding: 5px 8px; font-size: 13px; }
-.inp:focus { outline: none; border-color: #644bdc; }
+.inp:focus { outline: none; border-color: #2468DB; }
 .muted { color: #ccc; }
 .del { border: none; background: none; color: #e02b2b; cursor: pointer; font-size: 15px; display: inline-flex; }
 .add-btn { margin-top: 10px; }

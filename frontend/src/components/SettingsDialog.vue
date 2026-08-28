@@ -216,7 +216,7 @@ async function toggleEnable() {
 .tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid #f0f0f0; }
 .tab { padding: 8px 16px; cursor: pointer; color: #666; font-size: 14px; border-bottom: 2px solid transparent; display: inline-flex; align-items: center; gap: 5px; }
 .tab .ri { font-size: 15px; }
-.tab.active { color: #644bdc; border-bottom-color: #644bdc; font-weight: 500; }
+.tab.active { color: #2468DB; border-bottom-color: #2468DB; font-weight: 500; }
 .tab-body { flex: 1; overflow: auto; padding: 16px 20px; }
 
 .mock-row { margin-bottom: 16px; padding: 10px 12px; background: #faf9ff; border-radius: 4px; }
@@ -227,7 +227,7 @@ async function toggleEnable() {
 .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .form-row label { width: 80px; color: #666; font-size: 13px; }
 .inp { flex: 1; border: 1px solid #e5e5e5; border-radius: 4px; padding: 6px 10px; font-size: 13px; }
-.inp:focus { outline: none; border-color: #644bdc; }
+.inp:focus { outline: none; border-color: #2468DB; }
 .test-result { margin-left: 10px; font-size: 12px; }
 .test-result.ok { color: #389e0d; }
 .test-result.fail { color: #cf1322; }
@@ -238,7 +238,7 @@ async function toggleEnable() {
 .skill-list-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 13px; color: #666; }
 .skill-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; }
 .skill-item:hover { background: #f5f5f5; }
-.skill-item.active { background: #f5f2ff; color: #644bdc; }
+.skill-item.active { background: #eef4fd; color: #2468DB; }
 .skill-actions { display: flex; gap: 8px; align-items: center; }
 .enabled-dot { color: #52c41a; font-size: 14px; }
 .del { color: #e02b2b; font-size: 14px; cursor: pointer; }

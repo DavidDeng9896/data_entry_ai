@@ -169,7 +169,7 @@ async function deleteTable(t) {
 .page { height: 100%; display: flex; flex-direction: column; background: #fff; }
 .topbar { height: 52px; background: #fff; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; }
 .brand { display: flex; align-items: center; gap: 10px; }
-.logo { color: #644bdc; font-size: 22px; }
+.logo { color: #2468DB; font-size: 22px; }
 .brand-name { font-size: 15px; font-weight: 600; color: #1a1a1a; }
 .brand-sub { color: #b3b3b3; font-size: 12px; }
 .topbar-right { display: flex; gap: 8px; }
@@ -185,15 +185,15 @@ async function deleteTable(t) {
 /* 卡片列表 */
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
 .card { border: 1px solid #f0f0f0; border-radius: 8px; padding: 18px; transition: border-color 0.12s; background: #fff; }
-.card:hover { border-color: #d9d3f8; }
+.card:hover { border-color: #c5d8f7; }
 .card-top { display: flex; gap: 12px; align-items: flex-start; }
-.card-icon { font-size: 22px; color: #644bdc; background: #f5f2ff; border-radius: 6px; padding: 8px; }
+.card-icon { font-size: 22px; color: #2468DB; background: #eef4fd; border-radius: 6px; padding: 8px; }
 .card-info { flex: 1; min-width: 0; }
 .card-title { font-size: 15px; font-weight: 600; color: #1a1a1a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-desc { color: #999; font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { margin-top: 12px; }
 .meta-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #888; background: #fafafa; border-radius: 4px; padding: 3px 8px; }
-.meta-chip .ri { font-size: 13px; color: #644bdc; }
+.meta-chip .ri { font-size: 13px; color: #2468DB; }
 .card-actions { display: flex; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #f5f5f5; }
 .card-actions .btn.primary { flex: 1; justify-content: center; }
 
@@ -206,8 +206,8 @@ async function deleteTable(t) {
 .btn { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #e5e5e5; background: #fff; border-radius: 4px; padding: 5px 12px; font-size: 13px; color: #4a4a4a; transition: all 0.12s; }
 .btn:hover { border-color: #c9c9c9; }
 .btn .ri { font-size: 15px; }
-.btn.primary { background: #1c62d7; border-color: #1c62d7; color: #fff; }
-.btn.primary:hover { background: #2a6fe0; }
+.btn.primary { background: #2468DB; border-color: #2468DB; color: #fff; }
+.btn.primary:hover { background: #1d5bc4; }
 .btn.ghost { color: #666; }
 .btn.icon-only { padding: 5px 8px; }
 .btn.icon-only.danger:hover { color: #e02b2b; border-color: #ffc5c2; }
