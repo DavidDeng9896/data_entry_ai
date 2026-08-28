@@ -205,7 +205,14 @@ async def _aiter_chat_events(req: ChatRequest):
         yield "done", {k: result[k] for k in ("reply", "rows", "intent", "skill_id", "skill_name", "skill_auto", "skill_reason")}
         return
 
-    items = await asyncio.to_thread(_load_file_items, file_ids)
+    yield "step", {"text": "正在读取附件（大 Excel 解析可能要一会儿）…", "intent": intent}
+    items = None
+    async for kind, payload in _run_in_thread(_load_file_items, file_ids):
+        if kind == "ping":
+            yield "ping", {}
+        else:
+            items = payload
+    items = items or []
     file_meta = {
         "count": len(items),
         "chars": sum(i["chars"] for i in items),

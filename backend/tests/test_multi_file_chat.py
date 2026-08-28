@@ -60,6 +60,28 @@ class MultiFileChatTest(unittest.TestCase):
         self.assertIn("HW356009-P1", body)
         self.assertNotIn("CHO01", body)
 
+    def test_stream_four_files_into_monkey_pk(self):
+        client = TestClient(app)
+        uploaded = _upload_all(client)
+        file_ids = [fid for _, fid in uploaded]
+        with client.stream(
+            "POST",
+            "/api/recognize/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": "请识别"}],
+                "columns": PK_COLS,
+                "file_ids": file_ids,
+                "table_name": "Monkey PK",
+                "auto_skill": True,
+            },
+        ) as res:
+            self.assertEqual(res.status_code, 200)
+            body = "".join(res.iter_text())
+        self.assertIn("event: done", body)
+        self.assertIn("HW350003A", body)
+        self.assertIn("HW356009", body)
+        self.assertNotIn("CHO01", body)
+
     def test_chat_json_keeps_working_for_single_file(self):
         client = TestClient(app)
         path = PK_DIR / "DM-RF-2025022001（HW350003A)DPK检测报告.xlsx"
