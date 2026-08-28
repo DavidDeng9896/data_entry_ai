@@ -51,3 +51,43 @@ export function applyPasteGrid({ data, fields, startRowIndex, startColIndex, gri
   }
   return { added }
 }
+
+function cellKey(rowIndex, field) {
+  return `${rowIndex}::${field}`
+}
+
+function isCellEmpty(value) {
+  return value === '' || value == null || (typeof value === 'string' && !value.trim())
+}
+
+/** 只校验「至少填过一格」的行；空行跳过；有内容的格才做类型校验 */
+export function validateRowCells(row, rowIndex, columns) {
+  const errors = new Map()
+  if (!isRowFilled(row, columns)) return errors
+  for (const c of columns) {
+    const v = row[c.field]
+    const empty = isCellEmpty(v)
+    if (c.required && empty) {
+      errors.set(cellKey(rowIndex, c.field), `${c.title} 必填`)
+    } else if (!empty && c.type === 'number' && !isNumericLike(v)) {
+      errors.set(cellKey(rowIndex, c.field), '必须为数字')
+    } else if (!empty && c.type === 'select' && c.options?.length && !c.options.includes(String(v))) {
+      errors.set(cellKey(rowIndex, c.field), '存在内容与选项不匹配')
+    }
+  }
+  return errors
+}
+
+export function validateTable(data, columns) {
+  const errors = new Map()
+  ;(data || []).forEach((row, rowIndex) => {
+    validateRowCells(row, rowIndex, columns).forEach((msg, key) => errors.set(key, msg))
+  })
+  return errors
+}
+
+export function parseCellKey(key) {
+  const i = key.indexOf('::')
+  if (i < 0) return { rowIndex: -1, field: '' }
+  return { rowIndex: Number(key.slice(0, i)), field: key.slice(i + 2) }
+}

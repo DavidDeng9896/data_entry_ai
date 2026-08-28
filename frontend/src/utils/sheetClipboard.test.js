@@ -5,7 +5,8 @@ import {
   isRowFilled,
   filledRows,
   isNumericLike,
-  applyPasteGrid
+  applyPasteGrid,
+  validateRowCells
 } from './sheetClipboard.js'
 
 describe('parseClipboardText', () => {
@@ -56,5 +57,29 @@ describe('applyPasteGrid', () => {
       { a: '', b: '1', c: '2' },
       { a: '', b: '3', c: '4' }
     ])
+  })
+})
+
+describe('validateRowCells', () => {
+  const cols = [
+    { field: 'id', title: 'ID', type: 'text', required: true },
+    { field: 'val', title: 'Val', type: 'number', required: false }
+  ]
+  it('skips completely empty rows', () => {
+    assert.equal(validateRowCells({ id: '', val: '' }, 0, cols).size, 0)
+  })
+  it('flags only missing required on partial rows', () => {
+    const errs = validateRowCells({ id: '', val: '1.2' }, 1, cols)
+    assert.equal(errs.size, 1)
+    assert.equal(errs.get('1::id'), 'ID 必填')
+  })
+  it('does not flag empty optional number cells', () => {
+    const errs = validateRowCells({ id: 'A1', val: '' }, 0, cols)
+    assert.equal(errs.size, 0)
+  })
+  it('flags bad number only when cell has content', () => {
+    const errs = validateRowCells({ id: 'A1', val: 'abc' }, 0, cols)
+    assert.equal(errs.size, 1)
+    assert.equal(errs.get('0::val'), '必须为数字')
   })
 })

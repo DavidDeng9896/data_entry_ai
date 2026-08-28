@@ -41,8 +41,6 @@
               :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true, showAsterisk: false }"
               :mouse-config="{ selected: true }"
               :keyboard-config="keyboardConfig"
-              :valid-config="{ autoPos: true, showErrorMessage: true, message: 'inline', msgMode: 'single' }"
-              :edit-rules="editRules"
               :menu-config="menuConfig"
               :row-class-name="'inv-' + invalidPaint"
               :cell-class-name="cellClassName"
@@ -245,8 +243,9 @@ import {
   parseClipboardText,
   isRowFilled,
   filledRows,
-  isNumericLike,
-  applyPasteGrid
+  applyPasteGrid,
+  validateTable,
+  validateRowCells
 } from '../utils/sheetClipboard'
 
 const props = defineProps({
@@ -359,22 +358,6 @@ async function reloadColumns() {
 }
 defineExpose({ reloadColumns })
 
-const editRules = computed(() => {
-  const rules = {}
-  for (const c of columns.value) {
-    const list = []
-    if (c.required) list.push({ required: true, message: `${c.title} 必填` })
-    if (c.type === 'number') list.push({
-      validator: ({ cellValue }) => isNumericLike(cellValue) ? true : new Error('必须为数字')
-    })
-    if (c.type === 'select' && c.options.length) list.push({
-      validator: ({ cellValue }) => !cellValue || c.options.includes(cellValue) ? true : new Error('存在内容与选项不匹配')
-    })
-    if (list.length) rules[c.field] = list
-  }
-  return rules
-})
-
 function editorFor() {
   return { autofocus: '.cell-editor' }
 }
@@ -392,7 +375,8 @@ function addRows(n) {
 function cellClassName({ row, column }) {
   if (!column?.field) return ''
   const rowIndex = tableData.value.indexOf(row)
-  if (invalidMap.value.has(`${rowIndex}-${column.field}`)) return 'cell-invalid'
+  if (rowIndex < 0) return ''
+  if (invalidMap.value.has(`${rowIndex}::${column.field}`)) return 'cell-invalid'
   return ''
 }
 
@@ -670,7 +654,7 @@ async function runTurn() {
       applyRows(res.rows, { replace: true })
       notice.value = `AI 识别完成，填入 ${res.rows.length} 行（可继续对话修正后重新导入）`
       noticeType.value = 'success'
-      await validateFilled()
+      validateFilled()
       if (!chatOpen.value) unreadDone.value = true
     }
     scrollChat()
@@ -722,51 +706,44 @@ async function onEditClosed({ row, column } = {}) {
     tableRef.value?.revertData?.(row, column.field)
   }
   lastSheetKey.value = ''
-  await validateFilled()
+  if (row) validateFilled(row)
 }
 
-function collectInvalid(rows) {
-  const m = new Map()
-  for (const row of rows) {
-    const rowIndex = tableData.value.indexOf(row)
-    if (rowIndex < 0) continue
-    for (const c of columns.value) {
-      const v = row[c.field]
-      const empty = v === '' || v == null
-      if (c.required && empty) m.set(`${rowIndex}-${c.field}`, `${c.title} 必填`)
-      else if (c.type === 'number' && !isNumericLike(v)) m.set(`${rowIndex}-${c.field}`, '必须为数字')
-      else if (c.type === 'select' && c.options?.length && !empty && !c.options.includes(v)) {
-        m.set(`${rowIndex}-${c.field}`, '存在内容与选项不匹配')
-      }
+function applyValidationMap(nextMap, { rowIndex = null } = {}) {
+  if (rowIndex == null) {
+    invalidMap.value = nextMap
+  } else {
+    const merged = new Map(invalidMap.value)
+    for (const key of merged.keys()) {
+      const idx = Number(key.split('::')[0])
+      if (idx === rowIndex) merged.delete(key)
     }
+    nextMap.forEach((msg, key) => merged.set(key, msg))
+    invalidMap.value = merged
   }
-  return m
+  invalidPaint.value += 1
 }
 
-async function validateFilled() {
-  const $table = tableRef.value
-  const rows = filledRows(tableData.value, columns.value)
-  invalidMap.value = collectInvalid(rows)
-  invalidPaint.value += 1
-  if ($table?.clearValidate) await $table.clearValidate()
-  if (!$table || !rows.length) return
-  try {
-    await $table.fullValidate(rows)
-  } catch {
-    /* vxe 用 reject 表示有错误，格子会带 col--valid-error */
+function validateFilled(changedRow = null) {
+  if (changedRow) {
+    const rowIndex = tableData.value.indexOf(changedRow)
+    if (rowIndex < 0) return
+    applyValidationMap(validateRowCells(changedRow, rowIndex, columns.value), { rowIndex })
+    return
   }
+  applyValidationMap(validateTable(tableData.value, columns.value))
 }
 
 function clearInvalid() {
   invalidMap.value = new Map()
-  tableRef.value?.clearValidate?.()
+  invalidPaint.value += 1
 }
 
 async function confirmImport() {
+  validateFilled()
   const filled = filledRows(tableData.value, columns.value)
-  await validateFilled()
   if (invalidMap.value.size) {
-    notice.value = '存在校验未通过的数据，请修正标红单元格后再导入'
+    notice.value = `有 ${invalidMap.value.size} 个单元格需要修正（仅校验已填写行中的必填与格式）`
     noticeType.value = 'error'
     return
   }
@@ -994,8 +971,7 @@ async function confirmImport() {
   font-size: 13px; color: #333; text-align: left !important; border-color: #e8eaec !important;
 }
 .data-table :deep(.vxe-body--column .vxe-cell) { justify-content: flex-start !important; }
-.data-table :deep(.cell-invalid),
-.data-table :deep(.col--valid-error) { background-color: #ffe9e8 !important; color: #e02b2b; }
+.data-table :deep(.cell-invalid) { background-color: #ffe9e8 !important; color: #e02b2b; }
 
 .required-mark::after { content: ' *'; color: #e02b2b; }
 .col-info { color: #c0c0c0; margin-left: 4px; cursor: help; font-size: 13px; }
