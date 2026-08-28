@@ -10,7 +10,7 @@
 
         <div class="dialog-body">
           <div class="toolbar">
-            <span class="tip">请批量填入需要进行导入的数据，确认后将进行导入校验。可用右侧 AI 助手对话识别与修正。</span>
+            <span class="tip">单击选中后可直接键入；支持方向键 / Tab / Enter，Delete 清空，Esc 取消编辑。可从 Excel 复制后粘贴。右侧 AI 助手可识别填表。</span>
             <div class="toolbar-right">
               <button v-if="!chatOpen" class="btn ai-btn" @click="openChat">
                 <i class="ri-sparkling-2-line"></i> AI识别导入
@@ -24,50 +24,67 @@
             <i :class="noticeIcon"></i> {{ notice }}
           </div>
 
-          <vxe-table
-            ref="tableRef"
-            class="data-table"
-            border
-            show-overflow
-            keep-source
-            :height="430"
-            :data="tableData"
-            :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true }"
-            :mouse-config="{ selected: true, area: true }"
-            :keyboard-config="{ isArrow: true, isDel: true, isEnter: true, isTab: true, isEdit: true }"
-            :clip-config="{ isCopy: true, isCut: true, isPaste: true }"
-            :valid-config="{ msgMode: 'full' }"
-            :edit-rules="editRules"
-            @edit-closed="onEditClosed"
-          >
-            <vxe-column type="seq" title="" width="50" align="center" :edit-render="null"></vxe-column>
-            <vxe-column
-              v-for="col in columns"
-              :key="col.field"
-              :field="col.field"
-              :title="col.title"
-              min-width="120"
-              :edit-render="editorFor(col)"
+          <div class="table-wrap">
+            <vxe-table
+              ref="tableRef"
+              class="data-table"
+              border
+              keep-source
+              height="100%"
+              min-height="240"
+              show-overflow="title"
+              show-header-overflow="title"
+              :data="tableData"
+              :column-config="{ resizable: true }"
+              :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true, showAsterisk: false }"
+              :mouse-config="{ selected: true }"
+              :keyboard-config="keyboardConfig"
+              :valid-config="{ autoPos: true, showErrorMessage: true, message: 'inline', msgMode: 'single' }"
+              :edit-rules="editRules"
+              :menu-config="menuConfig"
+              :row-class-name="'inv-' + invalidPaint"
+              :cell-class-name="cellClassName"
+              @edit-closed="onEditClosed"
+              @menu-click="onMenuClick"
             >
-              <template #header>
-                <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
-                <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
-              </template>
-              <template #edit="{ row }">
-                <template v-if="col.type === 'select'">
-                  <select v-model="row[col.field]" class="cell-editor">
-                    <option value=""></option>
-                    <option v-for="opt in col.options" :key="opt" :value="opt">{{ opt }}</option>
-                  </select>
+              <vxe-column type="seq" title="" width="50" align="center" fixed="left" :edit-render="null"></vxe-column>
+              <vxe-column
+                v-for="(col, ci) in columns"
+                :key="col.field"
+                :field="col.field"
+                :title="col.title"
+                min-width="120"
+                :fixed="ci === 0 ? 'left' : ''"
+                :edit-render="editorFor(col)"
+                :align="col.type === 'number' ? 'right' : 'left'"
+              >
+                <template #header>
+                  <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
+                  <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
                 </template>
-                <input v-else v-model="row[col.field]" class="cell-editor"
-                  :type="col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : 'text'" />
-              </template>
-            </vxe-column>
-          </vxe-table>
+                <template #edit="{ row }">
+                  <template v-if="col.type === 'select'">
+                    <select v-model="row[col.field]" class="cell-editor">
+                      <option value=""></option>
+                      <option v-for="opt in col.options" :key="opt" :value="opt">{{ opt }}</option>
+                    </select>
+                  </template>
+                  <input
+                    v-else
+                    v-model="row[col.field]"
+                    class="cell-editor"
+                    type="text"
+                    :placeholder="col.type === 'date' ? 'YYYY-MM-DD' : ''"
+                  />
+                </template>
+              </vxe-column>
+            </vxe-table>
+          </div>
 
           <div class="table-footer">
             <button class="btn ghost" @click="addRows(1)"><i class="ri-add-line"></i> 添加行</button>
+            <button class="btn ghost" @click="insertRowBelowCurrent"><i class="ri-add-line"></i> 下方插入</button>
+            <button class="btn ghost" @click="removeCurrentRow"><i class="ri-delete-bin-line"></i> 删除行</button>
             <button class="btn ghost" @click="clearInvalid"><i class="ri-eraser-line"></i> 清除标红</button>
             <span class="invalid-count" v-if="invalidCount > 0"><i class="ri-error-warning-line"></i> {{ invalidCount }} 个单元格待修正</span>
           </div>
@@ -204,6 +221,13 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api'
+import {
+  parseClipboardText,
+  isRowFilled,
+  filledRows,
+  isNumericLike,
+  applyPasteGrid
+} from '../utils/sheetClipboard'
 
 const props = defineProps({
   tableId: { type: Number, required: true },
@@ -240,6 +264,29 @@ const noticeType = ref('info')
 const invalidMap = ref(new Map())
 
 const invalidCount = computed(() => invalidMap.value.size)
+const lastSheetKey = ref('')
+const invalidPaint = ref(0)
+const keyboardConfig = {
+  isArrow: true,
+  isDel: true,
+  isEnter: true,
+  isTab: true,
+  isEdit: true,
+  isEsc: true,
+  isBack: true
+}
+const menuConfig = {
+  enabled: true,
+  body: {
+    options: [
+      [
+        { code: 'insertBelow', name: '在下方插入行' },
+        { code: 'removeRow', name: '删除行' },
+        { code: 'clearCell', name: '清空单元格' }
+      ]
+    ]
+  }
+}
 const hasDraft = computed(() => !!chatInput.value.trim())
 const canSubmit = computed(() => chatThinking.value
   ? hasDraft.value
@@ -264,11 +311,19 @@ onMounted(async () => {
   const enabled = skills.value.find(s => s.enabled)
   if (enabled) pickedSkill.value = enabled.id
   addRows(14)
+  window.addEventListener('keydown', onWinKeydown, true)
+  window.addEventListener('copy', onWinCopy)
+  window.addEventListener('cut', onWinCut)
+  window.addEventListener('paste', onWinPaste)
 })
 
 onUnmounted(() => {
   stopClock()
   abortCtrl.value?.abort()
+  window.removeEventListener('keydown', onWinKeydown, true)
+  window.removeEventListener('copy', onWinCopy)
+  window.removeEventListener('cut', onWinCut)
+  window.removeEventListener('paste', onWinPaste)
 })
 
 async function loadColumns() {
@@ -286,7 +341,7 @@ const editRules = computed(() => {
     const list = []
     if (c.required) list.push({ required: true, message: `${c.title} 必填` })
     if (c.type === 'number') list.push({
-      validator: ({ cellValue }) => cellValue === '' || cellValue == null || !isNaN(Number(cellValue)) ? true : new Error('必须为数字')
+      validator: ({ cellValue }) => isNumericLike(cellValue) ? true : new Error('必须为数字')
     })
     if (c.type === 'select' && c.options.length) list.push({
       validator: ({ cellValue }) => !cellValue || c.options.includes(cellValue) ? true : new Error('存在内容与选项不匹配')
@@ -300,12 +355,139 @@ function editorFor() {
   return { autofocus: '.cell-editor' }
 }
 
+function emptyRow() {
+  const row = {}
+  for (const c of columns.value) row[c.field] = ''
+  return row
+}
+
 function addRows(n) {
-  for (let i = 0; i < n; i++) {
-    const row = {}
-    for (const c of columns.value) row[c.field] = ''
-    tableData.value.push(row)
+  for (let i = 0; i < n; i++) tableData.value.push(emptyRow())
+}
+
+function cellClassName({ row, column }) {
+  if (!column?.field) return ''
+  const rowIndex = tableData.value.indexOf(row)
+  if (invalidMap.value.has(`${rowIndex}-${column.field}`)) return 'cell-invalid'
+  return ''
+}
+
+function currentAnchor() {
+  const $table = tableRef.value
+  if (!$table) return null
+  return $table.getEditCell?.() || $table.getSelectedCell?.() || null
+}
+
+function insertRowBelow(row) {
+  const idx = tableData.value.indexOf(row)
+  const at = idx >= 0 ? idx + 1 : tableData.value.length
+  tableData.value.splice(at, 0, emptyRow())
+}
+
+function insertRowBelowCurrent() {
+  const sel = currentAnchor()
+  insertRowBelow(sel?.row || tableData.value[tableData.value.length - 1])
+}
+
+function removeRow(row) {
+  if (!row) return
+  if (tableData.value.length <= 1) {
+    const blank = emptyRow()
+    for (const c of columns.value) row[c.field] = blank[c.field]
+    return
   }
+  const idx = tableData.value.indexOf(row)
+  if (idx >= 0) tableData.value.splice(idx, 1)
+}
+
+function removeCurrentRow() {
+  const sel = currentAnchor()
+  removeRow(sel?.row || tableData.value[tableData.value.length - 1])
+  validateFilled()
+}
+
+function onMenuClick({ menu, row, column }) {
+  if (menu.code === 'insertBelow') insertRowBelow(row)
+  else if (menu.code === 'removeRow') {
+    removeRow(row)
+    validateFilled()
+  } else if (menu.code === 'clearCell' && column?.field) {
+    row[column.field] = ''
+    validateFilled()
+  }
+}
+
+function isChatTarget(el) {
+  const node = el && typeof el.closest === 'function' ? el : el?.parentElement
+  return !!node?.closest?.('.composer, .chat-drawer, .skill-select')
+}
+
+function isTypingElsewhere(el) {
+  if (isChatTarget(el)) return true
+  const tag = el?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+    return !el.classList?.contains('cell-editor')
+  }
+  return !!el?.isContentEditable
+}
+
+function onWinKeydown(e) {
+  lastSheetKey.value = e.key
+}
+
+function onWinCopy(e) {
+  if (isTypingElsewhere(e.target)) return
+  if (window.getSelection?.()?.toString?.()) return
+  const $table = tableRef.value
+  if (!$table || $table.getEditCell?.()) return
+  const sel = $table.getSelectedCell?.()
+  if (!sel?.row || !sel.column?.field || !e.clipboardData) return
+  const v = sel.row[sel.column.field]
+  e.clipboardData.setData('text/plain', v == null ? '' : String(v))
+  e.preventDefault()
+}
+
+function onWinCut(e) {
+  if (isTypingElsewhere(e.target)) return
+  const $table = tableRef.value
+  if (!$table || $table.getEditCell?.()) return
+  const sel = $table.getSelectedCell?.()
+  if (!sel?.row || !sel.column?.field || !e.clipboardData) return
+  const v = sel.row[sel.column.field]
+  e.clipboardData.setData('text/plain', v == null ? '' : String(v))
+  e.preventDefault()
+  sel.row[sel.column.field] = ''
+  validateFilled()
+}
+
+function onWinPaste(e) {
+  if (isTypingElsewhere(e.target)) return
+  const $table = tableRef.value
+  if (!$table || !e.clipboardData) return
+  const text = e.clipboardData.getData('text/plain')
+  if (text == null || text === '') return
+  const grid = parseClipboardText(text)
+  const multi = grid.length > 1 || (grid[0] && grid[0].length > 1)
+  const edit = $table.getEditCell?.()
+  if (edit && !multi) return
+  const sel = edit || $table.getSelectedCell?.()
+  if (!sel?.row) return
+  const fields = columns.value.map(c => c.field)
+  let startColIndex = fields.indexOf(sel.column?.field)
+  if (startColIndex < 0) startColIndex = 0
+  const startRowIndex = tableData.value.indexOf(sel.row)
+  if (startRowIndex < 0) return
+  e.preventDefault()
+  if (edit) $table.clearEdit?.()
+  applyPasteGrid({
+    data: tableData.value,
+    fields,
+    startRowIndex,
+    startColIndex,
+    grid,
+    makeEmptyRow: emptyRow
+  })
+  nextTick(validateFilled)
 }
 
 function openChat() {
@@ -440,7 +622,7 @@ async function runTurn() {
       applyRows(res.rows, { replace: true })
       notice.value = `AI 识别完成，填入 ${res.rows.length} 行（可继续对话修正后重新导入）`
       noticeType.value = 'success'
-      await validateAll()
+      await validateFilled()
       if (!chatOpen.value) unreadDone.value = true
     }
     scrollChat()
@@ -487,57 +669,57 @@ function applyRows(rows, { replace = true } = {}) {
   }
 }
 
-async function onEditClosed() {
-  await validateAll()
+async function onEditClosed({ row, column } = {}) {
+  if (lastSheetKey.value === 'Escape' && row && column?.field) {
+    tableRef.value?.revertData?.(row, column.field)
+  }
+  lastSheetKey.value = ''
+  await validateFilled()
 }
 
-async function validateAll() {
-  invalidMap.value = new Map()
-  const $table = tableRef.value
-  if (!$table) return
-  const errMap = await $table.validate(tableData.value, true).catch(e => e)
-  if (errMap) {
-    const m = new Map()
-    for (const rowid in errMap) {
-      for (const field in errMap[rowid]) {
-        const rowIndex = tableData.value.findIndex(r => $table.getRowid(r) === rowid)
-        m.set(`${rowIndex}-${field}`, errMap[rowid][field]?.content || errMap[rowid][field]?.message || '校验失败')
+function collectInvalid(rows) {
+  const m = new Map()
+  for (const row of rows) {
+    const rowIndex = tableData.value.indexOf(row)
+    if (rowIndex < 0) continue
+    for (const c of columns.value) {
+      const v = row[c.field]
+      const empty = v === '' || v == null
+      if (c.required && empty) m.set(`${rowIndex}-${c.field}`, `${c.title} 必填`)
+      else if (c.type === 'number' && !isNumericLike(v)) m.set(`${rowIndex}-${c.field}`, '必须为数字')
+      else if (c.type === 'select' && c.options?.length && !empty && !c.options.includes(v)) {
+        m.set(`${rowIndex}-${c.field}`, '存在内容与选项不匹配')
       }
     }
-    invalidMap.value = m
-    applyInvalidStyle()
   }
+  return m
 }
 
-function applyInvalidStyle() {
+async function validateFilled() {
   const $table = tableRef.value
-  if (!$table) return
-  $table.clearCellStyle?.()
-  const cells = []
-  invalidMap.value.forEach((msg, key) => {
-    const [rowIndex, field] = key.split('-')
-    cells.push({
-      row: tableData.value[Number(rowIndex)],
-      field,
-      style: { color: '#e02b2b', backgroundColor: '#ffe9e8' }
-    })
-  })
-  if (cells.length) $table.setCellStyle(cells)
+  const rows = filledRows(tableData.value, columns.value)
+  invalidMap.value = collectInvalid(rows)
+  invalidPaint.value += 1
+  if ($table?.clearValidate) await $table.clearValidate()
+  if (!$table || !rows.length) return
+  try {
+    await $table.fullValidate(rows)
+  } catch {
+    /* vxe 用 reject 表示有错误，格子会带 col--valid-error */
+  }
 }
 
 function clearInvalid() {
   invalidMap.value = new Map()
-  tableRef.value?.clearCellStyle?.()
+  tableRef.value?.clearValidate?.()
 }
 
 async function confirmImport() {
-  const $table = tableRef.value
-  const errMap = await $table.validate(tableData.value, true).catch(e => e)
-  const filled = tableData.value.filter(r => columns.value.some(c => r[c.field] !== '' && r[c.field] != null))
-  if (errMap) {
+  const filled = filledRows(tableData.value, columns.value)
+  await validateFilled()
+  if (invalidMap.value.size) {
     notice.value = '存在校验未通过的数据，请修正标红单元格后再导入'
     noticeType.value = 'error'
-    await validateAll()
     return
   }
   if (!filled.length) {
@@ -714,10 +896,13 @@ async function confirmImport() {
 .notice.warning { background: #fffbe6; color: #d48806; }
 .notice.error { background: #fff1f0; color: #cf1322; }
 
-.data-table { flex: 1; min-height: 0; }
+.data-table { height: 100%; }
+.table-wrap { flex: 1; min-height: 0; }
 .data-table :deep(.vxe-table--header-wrapper) { background: #fafafa; }
 .data-table :deep(.vxe-header--column) { background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px; }
 .data-table :deep(.vxe-body--column) { font-size: 13px; color: #333; }
+.data-table :deep(.cell-invalid),
+.data-table :deep(.col--valid-error) { background-color: #ffe9e8 !important; color: #e02b2b; }
 
 .required-mark::after { content: ' *'; color: #e02b2b; }
 .col-info { color: #c0c0c0; margin-left: 4px; cursor: help; font-size: 13px; }
