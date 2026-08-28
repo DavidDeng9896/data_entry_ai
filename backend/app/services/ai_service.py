@@ -12,6 +12,71 @@ from .. import database as db
 from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 
+# 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
+_LLM_CHUNK_CHARS = 24000
+_QA_FILE_CHARS = 12000
+
+
+def split_file_chunks(content: str, max_chars: int = _LLM_CHUNK_CHARS) -> list[str]:
+    text = content or ""
+    if len(text) <= max_chars:
+        return [text] if text else []
+    parts = [p for p in re.split(r"(?=^### )", text, flags=re.M) if p.strip()]
+    if not parts:
+        parts = [text]
+    chunks: list[str] = []
+    buf = ""
+    for part in parts:
+        if buf and len(buf) + len(part) > max_chars:
+            chunks.append(buf)
+            buf = part
+        else:
+            buf += part
+        while len(buf) > max_chars:
+            chunks.append(buf[:max_chars] + "\n[本段未结束，下一条消息继续；这是分页不是丢弃]")
+            buf = buf[max_chars:]
+    if buf.strip():
+        chunks.append(buf)
+    return chunks
+
+
+def compact_file_for_qa(content: str, file_meta: dict | None, limit: int = _QA_FILE_CHARS) -> str:
+    text = content or ""
+    meta = file_meta or {}
+    chars = meta.get("chars")
+    if chars is None:
+        chars = len(text)
+    truncated = bool(meta.get("truncated"))
+    status = "解析时被截断" if truncated else "本地已完整解析，未截断"
+    header = f"附件解析统计：共 {chars} 字符，{status}。"
+    if len(text) <= limit:
+        return f"{header}\n{text}"
+    half = max(limit // 2, 500)
+    return (
+        f"{header}问答轮次只附开头与结尾，避免网关超时；识别轮次会分页送全文。\n"
+        f"--- 开头 ---\n{text[:half]}\n--- 结尾 ---\n{text[-half:]}"
+    )
+
+
+def friendly_llm_error(exc: BaseException) -> str:
+    raw = str(exc) or type(exc).__name__
+    low = raw.lower()
+    if "504" in raw or "502" in raw or "timeout" in low or "timed out" in low or "gateway" in low:
+        return (
+            "模型网关超时（504）。附件较大或服务繁忙时会出现。"
+            "请再试一次；系统已改为分页送全文，而不是一次性塞进模型。"
+        )
+    if "403" in raw:
+        return raw[:300]
+    return f"对话失败：{raw[:240]}"
+
+
+def _retryable_llm_error(exc: BaseException) -> bool:
+    raw = str(exc)
+    low = raw.lower()
+    return any(s in raw for s in ("504", "502", "503", "429")) or "timeout" in low or "timed out" in low
+
+
 _BASELINE_PROMPT = """# 导入识别基线
 
 ## 1. 角色与任务
@@ -366,7 +431,45 @@ def _mock_extract_with_skill(
 
 
 def _client(cfg: dict) -> OpenAI:
-    return OpenAI(base_url=cfg["base_url"], api_key=cfg["api_key"] or "sk-empty")
+    return OpenAI(
+        base_url=cfg["base_url"],
+        api_key=cfg["api_key"] or "sk-empty",
+        timeout=180.0,
+        max_retries=0,
+    )
+
+
+def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: float = 0) -> str:
+    last: BaseException | None = None
+    for attempt in range(3):
+        try:
+            stream = True if attempt == 0 else False
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                stream=stream,
+            )
+            if stream:
+                parts: list[str] = []
+                for ev in resp:
+                    if not ev.choices:
+                        continue
+                    delta = ev.choices[0].delta
+                    if delta and delta.content:
+                        parts.append(delta.content)
+                return "".join(parts)
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            last = e
+            msg = str(e).lower()
+            stream_unsupported = "stream" in msg and ("not" in msg or "unsupport" in msg or "invalid" in msg)
+            if stream_unsupported and attempt == 0:
+                continue
+            if not _retryable_llm_error(e) or attempt >= 2:
+                raise
+            time.sleep(1.2 * (attempt + 1))
+    raise last or RuntimeError("模型调用失败")
 
 
 def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | None) -> tuple[list[dict], str]:
@@ -379,15 +482,15 @@ def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | 
 
     cfg = settings["text_model"]
     client = _client(cfg)
-    resp = client.chat.completions.create(
-        model=cfg["model"],
-        messages=[
+    raw = _complete(
+        client,
+        cfg["model"],
+        [
             {"role": "system", "content": _build_system_prompt(columns, skill_content, mode="recognize")},
             {"role": "user", "content": f"请从以下内容中提取数据：\n\n{content}"},
         ],
-        temperature=0,
     )
-    rows = _extract_json_array(resp.choices[0].message.content or "")
+    rows = _extract_json_array(raw)
     return rows, "" if rows else "模型未返回有效数据，请检查内容或模型配置"
 
 
@@ -444,15 +547,43 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         msgs.append({"role": m.role, "content": m.content})
 
     if file_content:
-        msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
+        if intent == "chat":
+            msgs.append({"role": "user", "content": compact_file_for_qa(file_content, file_meta)})
+        else:
+            chunks = split_file_chunks(file_content)
+            if len(chunks) <= 1:
+                msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
+            else:
+                # 分页调用，合并行
+                if settings["mock"]:
+                    return _mock_chat_reply(messages, columns, file_content, skill_content, intent=intent)
+                cfg = settings["text_model"]
+                client = _client(cfg)
+                merged_rows: list[dict] = []
+                notes: list[str] = []
+                total = len(chunks)
+                for i, chunk in enumerate(chunks, 1):
+                    piece_msgs = list(msgs) + [{
+                        "role": "user",
+                        "content": (
+                            f"[完整解析后的第 {i}/{total} 页，不是截断丢弃]\n"
+                            f"{chunk}"
+                        ),
+                    }]
+                    raw = _complete(client, cfg["model"], piece_msgs)
+                    note, rows = _split_chat_reply(raw, columns)
+                    if note:
+                        notes.append(note)
+                    merged_rows.extend(rows)
+                reply = "\n".join(notes).strip() or f"已分页识别 {len(merged_rows)} 行（{total} 段）。"
+                return reply, merged_rows
 
     if settings["mock"]:
         return _mock_chat_reply(messages, columns, file_content, skill_content, intent=intent)
 
     cfg = settings["text_model"]
     client = _client(cfg)
-    resp = client.chat.completions.create(model=cfg["model"], messages=msgs, temperature=0)
-    raw = resp.choices[0].message.content or ""
+    raw = _complete(client, cfg["model"], msgs)
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []

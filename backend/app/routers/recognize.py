@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from .. import database as db
 from ..schemas import RecognizeRequest, ChatRequest
 from ..services import file_parser, ai_service
+from ..services.ai_service import friendly_llm_error, split_file_chunks
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
 
@@ -130,19 +131,37 @@ def _run_chat(req: ChatRequest) -> dict:
     }
 
 
-def _iter_chat_events(req: ChatRequest):
+async def _run_in_thread(fn, *args, **kwargs):
+    task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    while not task.done():
+        yield "ping", {}
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        except asyncio.TimeoutError:
+            continue
+    yield "result", task.result()
+
+
+async def _aiter_chat_events(req: ChatRequest):
     file_ids = _resolve_file_ids(req)
     last = _last_user_text(req.messages)
     intent = classify_intent(last, has_files=bool(file_ids))
 
     if intent == "chat":
         yield "step", {"text": "正在理解你的问题…", "intent": intent}
-        result = _run_chat(req)
+        result = None
+        async for kind, payload in _run_in_thread(_run_chat, req):
+            if kind == "ping":
+                yield "ping", {}
+            else:
+                result = payload
         yield "done", {k: result[k] for k in ("reply", "rows", "intent", "skill_id", "skill_name", "skill_auto", "skill_reason")}
         return
 
-    file_content, file_meta = _load_files_content(file_ids)
-    resolved = _resolve_for_request(req, file_content, allow_auto=True)
+    file_content, file_meta = await asyncio.to_thread(_load_files_content, file_ids)
+    resolved = await asyncio.to_thread(
+        lambda: _resolve_for_request(req, file_content, allow_auto=True)
+    )
     if resolved.get("skill_name"):
         yield "step", {"text": f"已加载 Skill：{resolved['skill_name']}", "intent": intent}
     else:
@@ -156,19 +175,28 @@ def _iter_chat_events(req: ChatRequest):
         yield "step", {"text": f"解析 {n_files} 个附件（共 {chars} 字符，完整读取）"}
 
     yield "step", {"text": f"映射 {len(req.columns)} 列"}
+    n_chunks = len(split_file_chunks(file_content or ""))
+    if n_chunks > 1:
+        yield "step", {"text": f"文件较大，分 {n_chunks} 段送给模型（避免网关超时）"}
 
-    reply, rows = ai_service.chat(
+    reply, rows = None, None
+    async for kind, payload in _run_in_thread(
+        ai_service.chat,
         req.messages,
         req.columns,
         resolved.get("skill_content"),
         file_content,
         intent=intent,
         file_meta=file_meta,
-    )
-    yield "step", {"text": f"完成 {len(rows)} 行"}
+    ):
+        if kind == "ping":
+            yield "ping", {}
+        else:
+            reply, rows = payload
+    yield "step", {"text": f"完成 {len(rows or [])} 行"}
     yield "done", {
         "reply": reply,
-        "rows": rows,
+        "rows": rows or [],
         "intent": intent,
         **_skill_meta_payload(resolved),
     }
@@ -219,18 +247,22 @@ def chat(req: ChatRequest):
         result.pop("file_meta", None)
         return result
     except Exception as e:
-        raise HTTPException(500, f"对话失败：{str(e)[:300]}")
+        raise HTTPException(500, friendly_llm_error(e))
 
 
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def gen():
         try:
-            for event, payload in _iter_chat_events(req):
+            async for event, payload in _aiter_chat_events(req):
+                if event == "ping":
+                    yield ": keepalive\n\n"
+                    continue
                 yield _sse(event, payload)
-                await asyncio.sleep(0.35 if event == "step" else 0)
+                if event == "step":
+                    await asyncio.sleep(0.15)
         except Exception as e:
-            yield _sse("error", {"message": f"对话失败：{str(e)[:300]}"})
+            yield _sse("error", {"message": friendly_llm_error(e)})
 
     return StreamingResponse(
         gen(),
