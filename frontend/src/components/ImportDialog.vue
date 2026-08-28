@@ -10,7 +10,7 @@
 
         <div class="dialog-body">
           <div class="toolbar">
-            <span class="tip">请批量填入需要进行导入的数据，确认后将进行导入校验。可用右侧 AI 助手对话识别与修正。</span>
+            <span class="tip">单击选中后可直接键入；支持方向键 / Tab / Enter，Delete 清空，Esc 取消编辑。可从 Excel 复制后粘贴。右侧 AI 助手可识别填表。</span>
             <div class="toolbar-right">
               <button v-if="!chatOpen" class="btn ai-btn" @click="openChat">
                 <i class="ri-sparkling-2-line"></i> AI识别导入
@@ -24,50 +24,68 @@
             <i :class="noticeIcon"></i> {{ notice }}
           </div>
 
-          <vxe-table
-            ref="tableRef"
-            class="data-table"
-            border
-            show-overflow
-            keep-source
-            :height="430"
-            :data="tableData"
-            :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true }"
-            :mouse-config="{ selected: true, area: true }"
-            :keyboard-config="{ isArrow: true, isDel: true, isEnter: true, isTab: true, isEdit: true }"
-            :clip-config="{ isCopy: true, isCut: true, isPaste: true }"
-            :valid-config="{ msgMode: 'full' }"
-            :edit-rules="editRules"
-            @edit-closed="onEditClosed"
-          >
-            <vxe-column type="seq" title="" width="50" align="center" :edit-render="null"></vxe-column>
-            <vxe-column
-              v-for="col in columns"
-              :key="col.field"
-              :field="col.field"
-              :title="col.title"
-              min-width="120"
-              :edit-render="editorFor(col)"
+          <div class="table-wrap">
+            <vxe-table
+              ref="tableRef"
+              class="data-table"
+              border="full"
+              keep-source
+              height="100%"
+              min-height="240"
+              show-overflow="title"
+              show-header-overflow="title"
+              align="left"
+              header-align="left"
+              :data="tableData"
+              :column-config="{ resizable: true }"
+              :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true, showAsterisk: false }"
+              :mouse-config="{ selected: true }"
+              :keyboard-config="keyboardConfig"
+              :menu-config="menuConfig"
+              :row-class-name="'inv-' + invalidPaint"
+              :cell-class-name="cellClassName"
+              @edit-closed="onEditClosed"
+              @menu-click="onMenuClick"
             >
-              <template #header>
-                <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
-                <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
-              </template>
-              <template #edit="{ row }">
-                <template v-if="col.type === 'select'">
-                  <select v-model="row[col.field]" class="cell-editor">
-                    <option value=""></option>
-                    <option v-for="opt in col.options" :key="opt" :value="opt">{{ opt }}</option>
-                  </select>
+              <vxe-column type="seq" title="#" width="50" align="left" header-align="left" fixed="left" :edit-render="null"></vxe-column>
+              <vxe-column
+                v-for="(col, ci) in columns"
+                :key="col.field"
+                :field="col.field"
+                :title="col.title"
+                min-width="120"
+                align="left"
+                header-align="left"
+                :fixed="ci === 0 ? 'left' : ''"
+                :edit-render="editorFor(col)"
+              >
+                <template #header>
+                  <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
+                  <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
                 </template>
-                <input v-else v-model="row[col.field]" class="cell-editor"
-                  :type="col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : 'text'" />
-              </template>
-            </vxe-column>
-          </vxe-table>
+                <template #edit="{ row }">
+                  <template v-if="col.type === 'select'">
+                    <select v-model="row[col.field]" class="cell-editor">
+                      <option value=""></option>
+                      <option v-for="opt in col.options" :key="opt" :value="opt">{{ opt }}</option>
+                    </select>
+                  </template>
+                  <input
+                    v-else
+                    v-model="row[col.field]"
+                    class="cell-editor"
+                    type="text"
+                    :placeholder="col.type === 'date' ? 'YYYY-MM-DD' : ''"
+                  />
+                </template>
+              </vxe-column>
+            </vxe-table>
+          </div>
 
           <div class="table-footer">
             <button class="btn ghost" @click="addRows(1)"><i class="ri-add-line"></i> 添加行</button>
+            <button class="btn ghost" @click="insertRowBelowCurrent"><i class="ri-add-line"></i> 下方插入</button>
+            <button class="btn ghost" @click="removeCurrentRow"><i class="ri-delete-bin-line"></i> 删除行</button>
             <button class="btn ghost" @click="clearInvalid"><i class="ri-eraser-line"></i> 清除标红</button>
             <span class="invalid-count" v-if="invalidCount > 0"><i class="ri-error-warning-line"></i> {{ invalidCount }} 个单元格待修正</span>
           </div>
@@ -81,104 +99,121 @@
 
       <aside v-show="chatOpen" class="chat-drawer">
         <div class="chat-header">
-          <span class="chat-title"><i class="ri-chat-3-line"></i> AI 导入助手</span>
-          <select v-model="pickedSkill" class="skill-select" title="导入模板 Skill">
-            <option value="">不使用模板</option>
-            <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
-          </select>
-          <button class="icon-btn" type="button" title="收起助手（后台继续执行）" @click="collapseChat">
-            <i class="ri-close-line"></i>
+          <div class="chat-header-main">
+            <span class="chat-title">导入助手</span>
+            <span v-if="chatThinking" class="chat-badge busy"><i class="ri-loader-4-line spin"></i> 识别中 {{ runClock }}</span>
+            <span v-else-if="unreadDone" class="chat-badge done">有新结果</span>
+          </div>
+          <button class="icon-btn" type="button" title="收起（后台继续）" @click="collapseChat">
+            <i class="ri-contract-right-line"></i>
           </button>
         </div>
 
         <div class="chat-scroll" ref="chatMsgs" data-conversation-scroll>
           <div v-if="!chatLog.length && !chatThinking" class="chat-empty">
-            <i class="ri-chat-smile-2-line"></i>
-            <div>上传文件或描述规则，发送后识别填入左侧表格。结果不对可继续对话重新导入。</div>
+            <div class="chat-empty-title">描述规则或上传文件</div>
+            <div class="chat-empty-desc">点击左上角上传附件（可多选），或输入规则后发送识别。</div>
           </div>
 
-          <div v-for="(m, i) in chatLog" :key="i" :class="['node', m.role, { pending: m.pending }]">
-            <div class="node-body">
+          <article
+            v-for="(m, i) in chatLog"
+            :key="i"
+            :class="['turn', m.role, { pending: m.pending }]"
+          >
+            <div class="turn-label">{{ m.role === 'user' ? '你' : '助手' }}</div>
+            <div class="turn-body">
               <template v-if="m.fileChip">
-                <i class="ri-file-text-line"></i> {{ m.content }}
+                <span class="turn-file"><i class="ri-file-text-line"></i>{{ m.content }}</span>
               </template>
               <template v-else>{{ m.content }}</template>
             </div>
-            <div v-if="m.pending" class="node-meta">排队中</div>
-          </div>
-
-          <div v-if="chatThinking" class="node status">
-            <div class="status-row">
-              <i class="ri-loader-4-line spin"></i>
-              <span>正在识别…</span>
-              <span class="run-clock">{{ runClock }}</span>
-            </div>
-          </div>
+            <div v-if="m.pending" class="turn-meta">已排队，等待当前轮结束</div>
+          </article>
         </div>
 
-        <!-- Queue dock -->
         <div v-if="chatQueue.length" class="queue-dock">
           <button type="button" class="queue-head" @click="queueOpen = !queueOpen">
-            <i class="ri-play-list-2-line"></i>
-            <span>{{ chatQueue.length }} 条已排队</span>
+            <i class="ri-time-line"></i>
+            <span>{{ chatQueue.length }} 条排队</span>
             <i :class="queueOpen ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'"></i>
           </button>
           <ul v-if="queueOpen" class="queue-list">
             <li v-for="(q, qi) in chatQueue" :key="q.id">
               <span class="queue-text">{{ q.text }}</span>
-              <button type="button" class="icon-btn sm" title="移出队列" @click="removeQueued(qi)">
+              <button type="button" class="icon-btn sm" title="移出" @click="removeQueued(qi)">
                 <i class="ri-close-line"></i>
               </button>
             </li>
           </ul>
         </div>
 
-        <!-- Harness-style composer card -->
         <div class="composer">
-          <div v-if="chatFileId && chatFile" class="composer-chips">
-            <span class="file-chip" :title="chatFile.name">
-              <i class="ri-file-text-line"></i>
-              <span class="file-chip-name">{{ chatFile.name }}</span>
-              <button type="button" class="chip-x" @click="clearFile" title="移除文件">
-                <i class="ri-close-line"></i>
-              </button>
-            </span>
+          <div class="composer-attach-row">
+            <label class="upload-btn" title="上传一个或多个附件">
+              <input
+                type="file"
+                ref="fileInput"
+                class="upload-input"
+                multiple
+                accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md"
+                @change="onFileChange"
+              />
+              <i class="ri-upload-cloud-2-line"></i>
+              <span>上传附件</span>
+            </label>
+            <div v-if="chatAttachments.length" class="composer-chips">
+              <span
+                v-for="att in chatAttachments"
+                :key="att.localId"
+                class="file-chip"
+                :class="{ uploading: att.uploading, error: att.error }"
+                :title="att.error || att.name"
+              >
+                <i v-if="att.uploading" class="ri-loader-4-line spin"></i>
+                <i v-else-if="att.error" class="ri-error-warning-line"></i>
+                <i v-else class="ri-file-text-line"></i>
+                <span class="file-chip-name">{{ att.name }}</span>
+                <button type="button" class="chip-x" @click="removeAttachment(att.localId)" title="移除">
+                  <i class="ri-close-line"></i>
+                </button>
+              </span>
+            </div>
           </div>
           <textarea
             v-model="chatInput"
             class="composer-input"
             rows="3"
             :placeholder="composerPlaceholder"
-            :disabled="false"
             @keydown="onComposerKeydown"
           />
-          <div class="composer-bar">
-            <span v-if="!chatThinking" class="composer-hint">Enter 发送</span>
+          <div class="composer-toolbar">
+            <label class="skill-picker" title="导入 Skill 模板">
+              <i class="ri-book-2-line"></i>
+              <select v-model="pickedSkill" class="skill-select">
+                <option value="">无模板</option>
+                <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
+              </select>
+              <i class="ri-arrow-down-s-line skill-caret"></i>
+            </label>
             <div class="composer-actions">
-              <label class="icon-btn attach" title="上传文件">
-                <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
-                  accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md" />
-                <i class="ri-attachment-2"></i>
-              </label>
               <button
                 v-if="chatThinking && canSteer"
                 type="button"
                 class="btn steer"
-                title="打断当前轮，立即按本条指令重新导入"
+                title="打断并按新指令重导"
                 @click="steerNow"
-                :disabled="!canSteer"
               >
-                <i class="ri-skip-forward-line"></i> 立即重导
+                <i class="ri-skip-forward-line"></i>
+                <span>立即重导</span>
               </button>
               <button
                 type="button"
                 class="btn send"
-                :title="chatThinking ? '排队，等本轮结束后自动执行' : '发送'"
+                :title="chatThinking ? '排队' : '发送'"
                 @click="sendOrQueue"
                 :disabled="!canSubmit"
               >
-                <i class="ri-send-plane-line"></i>
-                <span>{{ chatThinking ? '排队' : '发送' }}</span>
+                <i class="ri-arrow-up-line"></i>
               </button>
             </div>
           </div>
@@ -204,6 +239,14 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { api } from '../api'
+import {
+  parseClipboardText,
+  isRowFilled,
+  filledRows,
+  applyPasteGrid,
+  validateTable,
+  validateRowCells
+} from '../utils/sheetClipboard'
 
 const props = defineProps({
   tableId: { type: Number, required: true },
@@ -220,8 +263,7 @@ const chatOpen = ref(false)
 const chatSessionStarted = ref(false)
 const chatLog = ref([])
 const chatInput = ref('')
-const chatFile = ref(null)
-const chatFileId = ref(null)
+const chatAttachments = ref([])
 const chatThinking = ref(false)
 const chatMsgs = ref(null)
 const pickedSkill = ref('')
@@ -240,15 +282,43 @@ const noticeType = ref('info')
 const invalidMap = ref(new Map())
 
 const invalidCount = computed(() => invalidMap.value.size)
+const lastSheetKey = ref('')
+const invalidPaint = ref(0)
+const keyboardConfig = {
+  isArrow: true,
+  isDel: true,
+  isEnter: true,
+  isTab: true,
+  isEdit: true,
+  isEsc: true,
+  isBack: true
+}
+const menuConfig = {
+  enabled: true,
+  body: {
+    options: [
+      [
+        { code: 'insertBelow', name: '在下方插入行' },
+        { code: 'removeRow', name: '删除行' },
+        { code: 'clearCell', name: '清空单元格' }
+      ]
+    ]
+  }
+}
 const hasDraft = computed(() => !!chatInput.value.trim())
-const canSubmit = computed(() => chatThinking.value
-  ? hasDraft.value
-  : !!(hasDraft.value || chatFileId.value))
-const canSteer = computed(() => !!(hasDraft.value || chatFileId.value || chatQueue.value.length))
+const readyFileIds = computed(() =>
+  chatAttachments.value.filter(a => a.fileId && !a.uploading && !a.error).map(a => a.fileId))
+const hasReadyFiles = computed(() => readyFileIds.value.length > 0)
+const isUploadingFiles = computed(() => chatAttachments.value.some(a => a.uploading))
+const canSubmit = computed(() => {
+  if (isUploadingFiles.value) return false
+  return chatThinking.value ? hasDraft.value : !!(hasDraft.value || hasReadyFiles.value)
+})
+const canSteer = computed(() => !!(hasDraft.value || hasReadyFiles.value || chatQueue.value.length))
 const composerPlaceholder = computed(() => {
-  if (chatThinking.value) return '本轮进行中：Enter 排队；或点「立即重导」打断并按新指令覆盖表格'
-  if (chatFileId.value) return '继续提要求，或直接发送识别导入'
-  return '输入规则或要求，Enter 发送，Shift+Enter 换行'
+  if (chatThinking.value) return '识别中… Enter 排队，或点「立即重导」打断'
+  if (hasReadyFiles.value) return '可补充要求后发送；将按当前 Skill 识别全部附件'
+  return '上传附件或描述规则，Enter 发送，Shift+Enter 换行'
 })
 
 const noticeIcon = computed(() => ({
@@ -264,11 +334,19 @@ onMounted(async () => {
   const enabled = skills.value.find(s => s.enabled)
   if (enabled) pickedSkill.value = enabled.id
   addRows(14)
+  window.addEventListener('keydown', onWinKeydown, true)
+  window.addEventListener('copy', onWinCopy)
+  window.addEventListener('cut', onWinCut)
+  window.addEventListener('paste', onWinPaste)
 })
 
 onUnmounted(() => {
   stopClock()
   abortCtrl.value?.abort()
+  window.removeEventListener('keydown', onWinKeydown, true)
+  window.removeEventListener('copy', onWinCopy)
+  window.removeEventListener('cut', onWinCut)
+  window.removeEventListener('paste', onWinPaste)
 })
 
 async function loadColumns() {
@@ -280,32 +358,144 @@ async function reloadColumns() {
 }
 defineExpose({ reloadColumns })
 
-const editRules = computed(() => {
-  const rules = {}
-  for (const c of columns.value) {
-    const list = []
-    if (c.required) list.push({ required: true, message: `${c.title} 必填` })
-    if (c.type === 'number') list.push({
-      validator: ({ cellValue }) => cellValue === '' || cellValue == null || !isNaN(Number(cellValue)) ? true : new Error('必须为数字')
-    })
-    if (c.type === 'select' && c.options.length) list.push({
-      validator: ({ cellValue }) => !cellValue || c.options.includes(cellValue) ? true : new Error('存在内容与选项不匹配')
-    })
-    if (list.length) rules[c.field] = list
-  }
-  return rules
-})
-
 function editorFor() {
   return { autofocus: '.cell-editor' }
 }
 
+function emptyRow() {
+  const row = {}
+  for (const c of columns.value) row[c.field] = ''
+  return row
+}
+
 function addRows(n) {
-  for (let i = 0; i < n; i++) {
-    const row = {}
-    for (const c of columns.value) row[c.field] = ''
-    tableData.value.push(row)
+  for (let i = 0; i < n; i++) tableData.value.push(emptyRow())
+}
+
+function cellClassName({ row, column }) {
+  if (!column?.field) return ''
+  const rowIndex = tableData.value.indexOf(row)
+  if (rowIndex < 0) return ''
+  if (invalidMap.value.has(`${rowIndex}::${column.field}`)) return 'cell-invalid'
+  return ''
+}
+
+function currentAnchor() {
+  const $table = tableRef.value
+  if (!$table) return null
+  return $table.getEditCell?.() || $table.getSelectedCell?.() || null
+}
+
+function insertRowBelow(row) {
+  const idx = tableData.value.indexOf(row)
+  const at = idx >= 0 ? idx + 1 : tableData.value.length
+  tableData.value.splice(at, 0, emptyRow())
+}
+
+function insertRowBelowCurrent() {
+  const sel = currentAnchor()
+  insertRowBelow(sel?.row || tableData.value[tableData.value.length - 1])
+}
+
+function removeRow(row) {
+  if (!row) return
+  if (tableData.value.length <= 1) {
+    const blank = emptyRow()
+    for (const c of columns.value) row[c.field] = blank[c.field]
+    return
   }
+  const idx = tableData.value.indexOf(row)
+  if (idx >= 0) tableData.value.splice(idx, 1)
+}
+
+function removeCurrentRow() {
+  const sel = currentAnchor()
+  removeRow(sel?.row || tableData.value[tableData.value.length - 1])
+  validateFilled()
+}
+
+function onMenuClick({ menu, row, column }) {
+  if (menu.code === 'insertBelow') insertRowBelow(row)
+  else if (menu.code === 'removeRow') {
+    removeRow(row)
+    validateFilled()
+  } else if (menu.code === 'clearCell' && column?.field) {
+    row[column.field] = ''
+    validateFilled()
+  }
+}
+
+function isChatTarget(el) {
+  const node = el && typeof el.closest === 'function' ? el : el?.parentElement
+  return !!node?.closest?.('.composer, .chat-drawer, .skill-picker, .skill-select')
+}
+
+function isTypingElsewhere(el) {
+  if (isChatTarget(el)) return true
+  const tag = el?.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+    return !el.classList?.contains('cell-editor')
+  }
+  return !!el?.isContentEditable
+}
+
+function onWinKeydown(e) {
+  lastSheetKey.value = e.key
+}
+
+function onWinCopy(e) {
+  if (isTypingElsewhere(e.target)) return
+  if (window.getSelection?.()?.toString?.()) return
+  const $table = tableRef.value
+  if (!$table || $table.getEditCell?.()) return
+  const sel = $table.getSelectedCell?.()
+  if (!sel?.row || !sel.column?.field || !e.clipboardData) return
+  const v = sel.row[sel.column.field]
+  e.clipboardData.setData('text/plain', v == null ? '' : String(v))
+  e.preventDefault()
+}
+
+function onWinCut(e) {
+  if (isTypingElsewhere(e.target)) return
+  const $table = tableRef.value
+  if (!$table || $table.getEditCell?.()) return
+  const sel = $table.getSelectedCell?.()
+  if (!sel?.row || !sel.column?.field || !e.clipboardData) return
+  const v = sel.row[sel.column.field]
+  e.clipboardData.setData('text/plain', v == null ? '' : String(v))
+  e.preventDefault()
+  sel.row[sel.column.field] = ''
+  validateFilled()
+}
+
+function onWinPaste(e) {
+  if (isTypingElsewhere(e.target)) return
+  const $table = tableRef.value
+  if (!$table || !e.clipboardData) return
+  const text = e.clipboardData.getData('text/plain')
+  if (text == null || text === '') return
+  const grid = parseClipboardText(text)
+  const multi = grid.length > 1 || (grid[0] && grid[0].length > 1)
+  const edit = $table.getEditCell?.()
+  if (edit && !multi) return
+  const sel = edit || $table.getSelectedCell?.()
+  if (!sel?.row) return
+  const fields = columns.value.map(c => c.field)
+  let startColIndex = fields.indexOf(sel.column?.field)
+  if (startColIndex < 0) startColIndex = 0
+  const startRowIndex = tableData.value.indexOf(sel.row)
+  if (startRowIndex < 0) return
+  e.preventDefault()
+  if (edit) $table.clearEdit?.()
+  applyPasteGrid({
+    data: tableData.value,
+    fields,
+    startRowIndex,
+    startColIndex,
+    grid,
+    makeEmptyRow: emptyRow
+  })
+  nextTick(validateFilled)
 }
 
 function openChat() {
@@ -338,24 +528,44 @@ function stopClock() {
   }
 }
 
-function clearFile() {
-  chatFile.value = null
-  chatFileId.value = null
-  if (fileInput.value) fileInput.value.value = ''
+function removeAttachment(localId) {
+  chatAttachments.value = chatAttachments.value.filter(a => a.localId !== localId)
+  if (!chatAttachments.value.length && fileInput.value) fileInput.value.value = ''
 }
 
-function onFileChange(e) {
-  const f = e.target.files[0]
-  if (!f) return
-  chatFile.value = f
-  api.upload(f).then(up => {
-    chatFileId.value = up.file_id
-    chatLog.value.push({ role: 'user', content: f.name, fileChip: true })
-    scrollChat()
-  }).catch(err => {
-    notice.value = `文件上传失败：${err.message}`
-    noticeType.value = 'error'
-  })
+async function onFileChange(e) {
+  const files = Array.from(e.target.files || [])
+  if (!files.length) return
+  if (fileInput.value) fileInput.value.value = ''
+  for (const f of files) {
+    const localId = `${Date.now()}-${Math.random()}`
+    const item = { localId, name: f.name, fileId: null, uploading: true, error: null }
+    chatAttachments.value.push(item)
+    try {
+      const up = await api.upload(f)
+      const idx = chatAttachments.value.findIndex(a => a.localId === localId)
+      if (idx >= 0) {
+        chatAttachments.value[idx] = { ...chatAttachments.value[idx], fileId: up.file_id, uploading: false }
+      }
+    } catch (err) {
+      const idx = chatAttachments.value.findIndex(a => a.localId === localId)
+      if (idx >= 0) {
+        chatAttachments.value[idx] = {
+          ...chatAttachments.value[idx],
+          uploading: false,
+          error: err.message || '上传失败'
+        }
+      }
+    }
+  }
+}
+
+function pushAttachmentBubbleIfNeeded() {
+  const names = chatAttachments.value
+    .filter(a => a.fileId && !a.error)
+    .map(a => a.name)
+  if (!names.length) return
+  chatLog.value.push({ role: 'user', content: names.join('、'), fileChip: true })
 }
 
 function onComposerKeydown(e) {
@@ -367,7 +577,7 @@ function onComposerKeydown(e) {
 
 function enqueueDraft() {
   const text = chatInput.value.trim()
-  if (!text && !chatFileId.value) return false
+  if (!text && !hasReadyFiles.value) return false
   if (text) {
     chatQueue.value.push({ id: `${Date.now()}-${Math.random()}`, text })
     chatLog.value.push({ role: 'user', content: text, pending: true })
@@ -389,6 +599,8 @@ function sendOrQueue() {
   if (text) {
     chatLog.value.push({ role: 'user', content: text })
     chatInput.value = ''
+  } else {
+    pushAttachmentBubbleIfNeeded()
   }
   runTurn()
 }
@@ -402,6 +614,8 @@ function steerNow() {
   if (text) {
     chatLog.value.push({ role: 'user', content: text })
     chatInput.value = ''
+  } else {
+    pushAttachmentBubbleIfNeeded()
   }
   runTurn()
 }
@@ -432,7 +646,7 @@ async function runTurn() {
         .map(m => ({ role: m.role, content: m.content })),
       columns: columns.value,
       skill_id: pickedSkill.value || null,
-      file_id: chatFileId.value
+      file_ids: readyFileIds.value
     }, { signal: abortCtrl.value.signal })
     if (myTurn !== turnSeq) return
     chatLog.value.push({ role: 'assistant', content: res.reply })
@@ -440,7 +654,7 @@ async function runTurn() {
       applyRows(res.rows, { replace: true })
       notice.value = `AI 识别完成，填入 ${res.rows.length} 行（可继续对话修正后重新导入）`
       noticeType.value = 'success'
-      await validateAll()
+      validateFilled()
       if (!chatOpen.value) unreadDone.value = true
     }
     scrollChat()
@@ -487,57 +701,50 @@ function applyRows(rows, { replace = true } = {}) {
   }
 }
 
-async function onEditClosed() {
-  await validateAll()
-}
-
-async function validateAll() {
-  invalidMap.value = new Map()
-  const $table = tableRef.value
-  if (!$table) return
-  const errMap = await $table.validate(tableData.value, true).catch(e => e)
-  if (errMap) {
-    const m = new Map()
-    for (const rowid in errMap) {
-      for (const field in errMap[rowid]) {
-        const rowIndex = tableData.value.findIndex(r => $table.getRowid(r) === rowid)
-        m.set(`${rowIndex}-${field}`, errMap[rowid][field]?.content || errMap[rowid][field]?.message || '校验失败')
-      }
-    }
-    invalidMap.value = m
-    applyInvalidStyle()
+async function onEditClosed({ row, column } = {}) {
+  if (lastSheetKey.value === 'Escape' && row && column?.field) {
+    tableRef.value?.revertData?.(row, column.field)
   }
+  lastSheetKey.value = ''
+  if (row) validateFilled(row)
 }
 
-function applyInvalidStyle() {
-  const $table = tableRef.value
-  if (!$table) return
-  $table.clearCellStyle?.()
-  const cells = []
-  invalidMap.value.forEach((msg, key) => {
-    const [rowIndex, field] = key.split('-')
-    cells.push({
-      row: tableData.value[Number(rowIndex)],
-      field,
-      style: { color: '#e02b2b', backgroundColor: '#ffe9e8' }
-    })
-  })
-  if (cells.length) $table.setCellStyle(cells)
+function applyValidationMap(nextMap, { rowIndex = null } = {}) {
+  if (rowIndex == null) {
+    invalidMap.value = nextMap
+  } else {
+    const merged = new Map(invalidMap.value)
+    for (const key of merged.keys()) {
+      const idx = Number(key.split('::')[0])
+      if (idx === rowIndex) merged.delete(key)
+    }
+    nextMap.forEach((msg, key) => merged.set(key, msg))
+    invalidMap.value = merged
+  }
+  invalidPaint.value += 1
+}
+
+function validateFilled(changedRow = null) {
+  if (changedRow) {
+    const rowIndex = tableData.value.indexOf(changedRow)
+    if (rowIndex < 0) return
+    applyValidationMap(validateRowCells(changedRow, rowIndex, columns.value), { rowIndex })
+    return
+  }
+  applyValidationMap(validateTable(tableData.value, columns.value))
 }
 
 function clearInvalid() {
   invalidMap.value = new Map()
-  tableRef.value?.clearCellStyle?.()
+  invalidPaint.value += 1
 }
 
 async function confirmImport() {
-  const $table = tableRef.value
-  const errMap = await $table.validate(tableData.value, true).catch(e => e)
-  const filled = tableData.value.filter(r => columns.value.some(c => r[c.field] !== '' && r[c.field] != null))
-  if (errMap) {
-    notice.value = '存在校验未通过的数据，请修正标红单元格后再导入'
+  validateFilled()
+  const filled = filledRows(tableData.value, columns.value)
+  if (invalidMap.value.size) {
+    notice.value = `有 ${invalidMap.value.size} 个单元格需要修正（仅校验已填写行中的必填与格式）`
     noticeType.value = 'error'
-    await validateAll()
     return
   }
   if (!filled.length) {
@@ -566,7 +773,7 @@ async function confirmImport() {
   display: flex; flex-direction: column; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
   min-height: 560px; max-height: 92vh;
 }
-.workspace.with-chat .dialog { width: min(900px, calc(96vw - 400px)); }
+.workspace.with-chat .dialog { width: min(880px, calc(96vw - 420px)); }
 
 .dialog-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0; }
 .title { font-size: 16px; font-weight: 600; color: #1a1a1a; }
@@ -596,99 +803,136 @@ async function confirmImport() {
 .badge-dot { background: #52c41a; }
 
 .chat-drawer {
-  width: 380px; flex-shrink: 0; background: #fff; border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08); display: flex; flex-direction: column;
-  overflow: hidden; border: 1px solid #ececec; min-height: 560px; max-height: 92vh;
+  width: 400px; flex-shrink: 0; background: #fff; border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08); display: flex; flex-direction: column;
+  overflow: hidden; border: 1px solid #e8eaed; min-height: 560px; max-height: 92vh;
 }
 .chat-header {
-  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-  border-bottom: 1px solid #f0f0f0; background: #fff; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid #eef0f2; background: #fff; flex-shrink: 0;
 }
-.chat-title { font-size: 13px; font-weight: 600; color: #2468DB; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.chat-title .ri { font-size: 16px; }
-.skill-select {
-  flex: 1; min-width: 0; border: 1px solid #e5e5e5; border-radius: 4px;
-  padding: 3px 6px; font-size: 12px; color: #555; background: #fff; outline: none;
+.chat-header-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.chat-title { font-size: 14px; font-weight: 600; color: #1a1a1a; white-space: nowrap; }
+.chat-badge {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap;
 }
-.skill-select:focus { border-color: #2468DB; }
+.chat-badge.busy { color: #2468DB; background: #eef4fd; }
+.chat-badge.done { color: #389e0d; background: #f6ffed; }
+
 .icon-btn {
-  border: none; background: transparent; color: #888; cursor: pointer;
-  width: 28px; height: 28px; border-radius: 6px; display: inline-flex;
-  align-items: center; justify-content: center; font-size: 16px;
+  border: none; background: transparent; color: #8a8f98; cursor: pointer;
+  width: 30px; height: 30px; border-radius: 8px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0;
 }
-.icon-btn:hover { color: #2468DB; background: #eef4fd; }
+.icon-btn:hover { color: #333; background: #f3f4f6; }
 .icon-btn.sm { width: 22px; height: 22px; font-size: 14px; }
-.icon-btn.attach { color: #2468DB; }
+.icon-btn.attach { color: #5f6b7a; }
 
 .chat-scroll {
-  flex: 1; overflow-y: auto; padding: 14px 14px 8px; display: flex; flex-direction: column;
-  gap: 10px; background: #fafbfc; min-height: 0; scrollbar-gutter: stable;
+  flex: 1; overflow-y: auto; padding: 14px 14px 10px; display: flex; flex-direction: column;
+  gap: 14px; background: #f7f8fa; min-height: 0; scrollbar-gutter: stable;
 }
-.chat-empty { text-align: center; color: #b3b3b3; font-size: 12px; padding: 28px 16px; line-height: 1.7; }
-.chat-empty .ri { font-size: 28px; display: block; margin-bottom: 8px; color: #bcd2f5; }
+.chat-empty { padding: 24px 8px; text-align: left; color: #8a8f98; }
+.chat-empty-title { font-size: 13px; font-weight: 500; color: #4a4a4a; margin-bottom: 6px; }
+.chat-empty-desc { font-size: 12px; line-height: 1.65; }
 
-.node { display: flex; flex-direction: column; max-width: 92%; }
-.node.user { align-self: flex-end; align-items: flex-end; }
-.node.assistant, .node.status { align-self: flex-start; }
-.node-body {
-  padding: 8px 12px; border-radius: 12px; font-size: 13px; line-height: 1.65; word-break: break-word;
+.turn { display: flex; flex-direction: column; gap: 4px; }
+.turn-label { font-size: 11px; color: #9aa0a8; line-height: 1; }
+.turn-body {
+  font-size: 13px; line-height: 1.7; color: #2b2f36; word-break: break-word;
+  white-space: pre-wrap;
 }
-.node.user .node-body { background: #2468DB; color: #fff; border-bottom-right-radius: 4px; }
-.node.user.pending .node-body { background: #9bb8ea; }
-.node.assistant .node-body { background: #fff; border: 1px solid #ececec; color: #333; border-bottom-left-radius: 4px; }
-.node-meta { font-size: 11px; color: #8aa4d4; margin-top: 3px; }
-.status-row {
-  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #5b7db8;
-  background: #eef4fd; border-radius: 8px; padding: 6px 10px;
+.turn.user .turn-body {
+  background: #fff; border: 1px solid #e8eaed; border-radius: 10px; padding: 10px 12px;
 }
-.run-clock { font-variant-numeric: tabular-nums; color: #8aa4d4; }
+.turn.user.pending .turn-body { opacity: 0.72; }
+.turn.assistant .turn-body { padding: 0 2px; }
+.turn-meta { font-size: 11px; color: #8aa4d4; padding-left: 2px; }
+.turn-file {
+  display: inline-flex; align-items: center; gap: 6px; color: #2468DB;
+  background: #eef4fd; border-radius: 6px; padding: 4px 8px; font-size: 12px;
+}
 
-.queue-dock { border-top: 1px solid #f0f0f0; background: #fff; flex-shrink: 0; }
+.queue-dock {
+  border-top: 1px solid #eef0f2; background: #fff; flex-shrink: 0;
+  border-bottom: 1px solid #eef0f2;
+}
 .queue-head {
-  width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 12px;
-  border: none; background: transparent; color: #2468DB; font-size: 12px; cursor: pointer;
+  width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 14px;
+  border: none; background: transparent; color: #5f6b7a; font-size: 12px; cursor: pointer;
 }
-.queue-head:hover { background: #eef4fd; }
-.queue-list { list-style: none; padding: 0 8px 8px; margin: 0; }
+.queue-head:hover { background: #f7f8fa; color: #2468DB; }
+.queue-list { list-style: none; padding: 0 10px 8px; margin: 0; }
 .queue-list li {
-  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
-  font-size: 12px; color: #555; border-radius: 4px;
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  font-size: 12px; color: #555; border-radius: 6px; background: #f7f8fa;
 }
 .queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .composer {
-  margin: 8px 10px 10px; border: 1px solid #e5e5e5; border-radius: 14px;
+  margin: 10px 12px 12px; border: 1px solid #dfe3e8; border-radius: 14px;
   background: #fff; padding: 10px 10px 8px; flex-shrink: 0;
-  box-shadow: 0 1px 4px rgba(36, 104, 219, 0.06);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
-.composer:focus-within { border-color: #2468DB; }
-.composer-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.composer:focus-within { border-color: #b8ccf5; box-shadow: 0 0 0 3px rgba(36, 104, 219, 0.08); }
+.composer-attach-row {
+  display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px dashed #e8eaed;
+}
+.upload-input { display: none; }
+.upload-btn {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  height: 34px; padding: 0 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid #c5d8f7; background: #eef4fd; color: #2468DB;
+  font-size: 13px; font-weight: 500; transition: all 0.12s;
+}
+.upload-btn:hover { background: #dfeafb; border-color: #9bb8ea; }
+.upload-btn .ri { font-size: 17px; }
+.composer-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
-  background: #eef4fd; color: #2468DB; border-radius: 8px; padding: 3px 8px; font-size: 12px;
+  background: #f3f6fb; color: #2b4f8f; border: 1px solid #e3ebf7;
+  border-radius: 8px; padding: 4px 8px; font-size: 12px;
 }
-.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-.chip-x { border: none; background: transparent; color: #2468DB; cursor: pointer; display: inline-flex; padding: 0; }
+.file-chip.uploading { opacity: 0.85; border-style: dashed; }
+.file-chip.error { color: #cf1322; background: #fff1f0; border-color: #ffccc7; }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.chip-x { border: none; background: transparent; color: #5f7db8; cursor: pointer; display: inline-flex; padding: 0; }
 .composer-input {
-  width: 100%; border: none; outline: none; resize: none; font-size: 13px; line-height: 1.55;
-  min-height: 64px; color: #333; background: transparent;
+  width: 100%; border: none; outline: none; resize: none; font-size: 13px; line-height: 1.6;
+  min-height: 72px; color: #1f2329; background: transparent;
 }
-.composer-input::placeholder { color: #b3b3b3; }
-.composer-bar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; min-height: 32px; }
-.composer-hint { font-size: 11px; color: #b3b3b3; white-space: nowrap; margin-right: auto; }
-.composer-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.composer-input::placeholder { color: #b0b6bf; }
+.composer-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 8px; min-height: 34px;
+}
+.skill-picker {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 1;
+  height: 32px; padding: 0 8px 0 6px; border-radius: 8px;
+  border: 1px solid #e8eaed; background: #f7f8fa; cursor: pointer; position: relative;
+}
+.skill-picker:hover { border-color: #d5dae0; background: #f3f4f6; }
+.skill-picker .ri-book-2-line { font-size: 15px; color: #6b7280; flex-shrink: 0; }
+.skill-caret { font-size: 14px; color: #9aa0a8; flex-shrink: 0; pointer-events: none; }
+.skill-select {
+  flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+  font-size: 12px; color: #374151; cursor: pointer; appearance: none; padding-right: 2px;
+}
+.composer-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .btn.steer {
-  border-color: #2468DB; color: #2468DB; background: #fff; border-radius: 8px; padding: 5px 10px;
-  white-space: nowrap;
+  border: 1px solid #c5d8f7; color: #2468DB; background: #fff; border-radius: 8px;
+  padding: 0 10px; height: 32px; font-size: 12px; white-space: nowrap;
 }
 .btn.steer:hover { background: #eef4fd; }
-.btn.steer:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn.send {
-  background: #2468DB; border-color: #2468DB; color: #fff; border-radius: 8px; padding: 5px 12px;
-  white-space: nowrap;
+  width: 32px; height: 32px; padding: 0; justify-content: center;
+  background: #2468DB; border: none; color: #fff; border-radius: 8px;
 }
 .btn.send:hover { background: #1d5bc4; }
-.btn.send:disabled { background: #9bb8ea; border-color: #9bb8ea; cursor: not-allowed; }
+.btn.send:disabled { background: #b8ccf5; cursor: not-allowed; }
+.btn.send .ri { font-size: 16px; }
 
 .chat-handle {
   position: absolute; right: -14px; top: 72px; transform: translateX(100%);
@@ -714,10 +958,20 @@ async function confirmImport() {
 .notice.warning { background: #fffbe6; color: #d48806; }
 .notice.error { background: #fff1f0; color: #cf1322; }
 
-.data-table { flex: 1; min-height: 0; }
+.data-table { height: 100%; }
+.table-wrap { flex: 1; min-height: 0; border: 1px solid #e8eaec; border-radius: 4px; overflow: hidden; }
 .data-table :deep(.vxe-table--header-wrapper) { background: #fafafa; }
-.data-table :deep(.vxe-header--column) { background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px; }
-.data-table :deep(.vxe-body--column) { font-size: 13px; color: #333; }
+.data-table :deep(.vxe-table--border-line) { border-color: #e8eaec !important; }
+.data-table :deep(.vxe-header--column) {
+  background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px;
+  text-align: left !important; border-color: #e8eaec !important;
+}
+.data-table :deep(.vxe-header--column .vxe-cell) { justify-content: flex-start !important; }
+.data-table :deep(.vxe-body--column) {
+  font-size: 13px; color: #333; text-align: left !important; border-color: #e8eaec !important;
+}
+.data-table :deep(.vxe-body--column .vxe-cell) { justify-content: flex-start !important; }
+.data-table :deep(.cell-invalid) { background-color: #ffe9e8 !important; color: #e02b2b; }
 
 .required-mark::after { content: ' *'; color: #e02b2b; }
 .col-info { color: #c0c0c0; margin-left: 4px; cursor: help; font-size: 13px; }
