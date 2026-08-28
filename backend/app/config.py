@@ -40,6 +40,7 @@ DEFAULT_SETTINGS = {
         "model": "gpt-4o",
     },
     "mock": True,  # 没有真实 key 时返回 mock 识别结果，便于先跑通交互
+    "parse_max_chars": 0,  # 0 = 解析文件时不截断
 }
 
 

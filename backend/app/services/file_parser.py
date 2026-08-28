@@ -45,8 +45,10 @@ def get_image_bytes(file_id: str) -> tuple[bytes, str]:
     return path.read_bytes(), path.suffix.lower().lstrip(".")
 
 
-def parse_to_text(file_id: str, max_chars: int = 20000) -> str:
-    """把文件内容解析成文本（markdown 表格优先），截断到 max_chars"""
+def parse_to_text(file_id: str, max_chars: int = 0) -> str:
+    """把文件内容解析成文本（markdown 表格优先）。
+    max_chars <= 0 表示不截断；仅当 max_chars > 0 且超长时才截断。
+    """
     path = _get_path(file_id)
     ext = path.suffix.lower()
 
@@ -59,8 +61,9 @@ def parse_to_text(file_id: str, max_chars: int = 20000) -> str:
     else:
         raise ValueError(f"不支持的文件类型: {ext}（扫描件/图片请走视觉模型）")
 
-    if len(text) > max_chars:
-        text = text[:max_chars] + f"\n...(已截断，共 {len(text)} 字符)"
+    if max_chars and max_chars > 0 and len(text) > max_chars:
+        orig = len(text)
+        text = text[:max_chars] + f"\n...(已截断，共 {orig} 字符)"
     return text
 
 

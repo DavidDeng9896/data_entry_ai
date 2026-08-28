@@ -101,7 +101,7 @@
         <div class="chat-header">
           <div class="chat-header-main">
             <span class="chat-title">导入助手</span>
-            <span v-if="chatThinking" class="chat-badge busy"><i class="ri-loader-4-line spin"></i> 识别中 {{ runClock }}</span>
+            <span v-if="chatThinking" class="chat-badge busy"><i class="ri-loader-4-line spin"></i> {{ thinkingLabel }} {{ runClock }}</span>
             <span v-else-if="unreadDone" class="chat-badge done">有新结果</span>
           </div>
           <button class="icon-btn" type="button" title="收起（后台继续）" @click="collapseChat">
@@ -122,7 +122,17 @@
           >
             <div class="turn-label">{{ m.role === 'user' ? '你' : '助手' }}</div>
             <div class="turn-body">
-              <template v-if="m.fileChip">
+              <ul v-if="m.streaming && m.steps?.length" class="progress-steps">
+                <li
+                  v-for="(s, si) in m.steps"
+                  :key="si"
+                  :class="{ done: s.done, current: !s.done && si === m.steps.length - 1 }"
+                >
+                  <i :class="s.done ? 'ri-checkbox-circle-fill' : 'ri-loader-4-line spin'"></i>
+                  <span>{{ s.text }}</span>
+                </li>
+              </ul>
+              <template v-else-if="m.fileChip">
                 <span class="turn-file"><i class="ri-file-text-line"></i>{{ m.content }}</span>
               </template>
               <template v-else>{{ m.content }}</template>
@@ -190,8 +200,9 @@
             <label class="skill-picker" title="导入 Skill 模板">
               <i class="ri-book-2-line"></i>
               <select v-model="pickedSkill" class="skill-select">
-                <option value="">无模板</option>
-                <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
+                <option value="auto">自动匹配</option>
+                <option value="">无模板（仅基线）</option>
+                <option v-for="s in skills" :key="s.id" :value="String(s.id)">{{ s.name }}</option>
               </select>
               <i class="ri-arrow-down-s-line skill-caret"></i>
             </label>
@@ -266,7 +277,8 @@ const chatInput = ref('')
 const chatAttachments = ref([])
 const chatThinking = ref(false)
 const chatMsgs = ref(null)
-const pickedSkill = ref('')
+const pickedSkill = ref('auto')
+const streamIntent = ref('recognize')
 const unreadDone = ref(false)
 const fileInput = ref(null)
 const chatQueue = ref([])
@@ -315,9 +327,14 @@ const canSubmit = computed(() => {
   return chatThinking.value ? hasDraft.value : !!(hasDraft.value || hasReadyFiles.value)
 })
 const canSteer = computed(() => !!(hasDraft.value || hasReadyFiles.value || chatQueue.value.length))
+const thinkingLabel = computed(() => (streamIntent.value === 'chat' ? '思考中' : '识别中'))
 const composerPlaceholder = computed(() => {
-  if (chatThinking.value) return '识别中… Enter 排队，或点「立即重导」打断'
-  if (hasReadyFiles.value) return '可补充要求后发送；将按当前 Skill 识别全部附件'
+  if (chatThinking.value) {
+    return streamIntent.value === 'chat'
+      ? '思考中… Enter 排队'
+      : '识别中… Enter 排队，或点「立即重导」打断'
+  }
+  if (hasReadyFiles.value) return '可补充要求后发送；空发送会识别附件，追问则只聊天'
   return '上传附件或描述规则，Enter 发送，Shift+Enter 换行'
 })
 
@@ -331,8 +348,7 @@ const noticeIcon = computed(() => ({
 onMounted(async () => {
   await loadColumns()
   skills.value = await api.listSkills()
-  const enabled = skills.value.find(s => s.enabled)
-  if (enabled) pickedSkill.value = enabled.id
+  pickedSkill.value = 'auto'
   addRows(14)
   window.addEventListener('keydown', onWinKeydown, true)
   window.addEventListener('copy', onWinCopy)
@@ -632,36 +648,67 @@ function settlePending(text) {
   if (m) m.pending = false
 }
 
+function skillPayload() {
+  if (pickedSkill.value === 'auto') return { skill_id: null, auto_skill: true }
+  if (!pickedSkill.value) return { skill_id: null, auto_skill: false }
+  const id = Number(pickedSkill.value)
+  return { skill_id: Number.isFinite(id) ? id : null, auto_skill: false }
+}
+
 async function runTurn() {
   turnSeq += 1
   const myTurn = turnSeq
   abortCtrl.value = new AbortController()
   chatThinking.value = true
+  streamIntent.value = 'recognize'
   startClock()
   scrollChat()
+  const assistant = { role: 'assistant', content: '', steps: [], streaming: true }
+  chatLog.value.push(assistant)
+  scrollChat()
   try {
-    const res = await api.chat({
+    const res = await api.chatStream({
       messages: chatLog.value
-        .filter(m => !m.fileChip && !m.pending)
+        .filter(m => !m.fileChip && !m.pending && !m.streaming && m.content)
         .map(m => ({ role: m.role, content: m.content })),
       columns: columns.value,
-      skill_id: pickedSkill.value || null,
-      file_ids: readyFileIds.value
-    }, { signal: abortCtrl.value.signal })
+      ...skillPayload(),
+      file_ids: readyFileIds.value,
+      table_name: props.tableName || ''
+    }, {
+      signal: abortCtrl.value.signal,
+      onStep: (step) => {
+        if (myTurn !== turnSeq) return
+        if (step.intent) streamIntent.value = step.intent
+        const prev = assistant.steps[assistant.steps.length - 1]
+        if (prev) prev.done = true
+        assistant.steps.push({ text: step.text, done: false })
+        scrollChat()
+      }
+    })
     if (myTurn !== turnSeq) return
-    chatLog.value.push({ role: 'assistant', content: res.reply })
-    if (res.rows && res.rows.length) {
+    assistant.steps.forEach(s => { s.done = true })
+    assistant.streaming = false
+    assistant.content = res.reply || ''
+    if (res.intent) streamIntent.value = res.intent
+    if (res.intent !== 'chat' && res.rows && res.rows.length) {
       applyRows(res.rows, { replace: true })
-      notice.value = `AI 识别完成，填入 ${res.rows.length} 行（可继续对话修正后重新导入）`
+      const skillHint = res.skill_name ? `（Skill：${res.skill_name}）` : ''
+      notice.value = `AI 识别完成，填入 ${res.rows.length} 行${skillHint}`
       noticeType.value = 'success'
       validateFilled()
       if (!chatOpen.value) unreadDone.value = true
     }
     scrollChat()
   } catch (e) {
-    if (e.name === 'AbortError' || e.message?.includes('abort')) return
+    if (e.name === 'AbortError' || e.message?.includes('abort')) {
+      const i = chatLog.value.lastIndexOf(assistant)
+      if (i >= 0 && assistant.streaming) chatLog.value.splice(i, 1)
+      return
+    }
     if (myTurn !== turnSeq) return
-    chatLog.value.push({ role: 'assistant', content: `出错了：${e.message}` })
+    assistant.streaming = false
+    assistant.content = `出错了：${e.message}`
     scrollChat()
   } finally {
     if (myTurn === turnSeq) {
@@ -853,6 +900,17 @@ async function confirmImport() {
   display: inline-flex; align-items: center; gap: 6px; color: #2468DB;
   background: #eef4fd; border-radius: 6px; padding: 4px 8px; font-size: 12px;
 }
+.progress-steps {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px;
+}
+.progress-steps li {
+  display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: #5f6b7a; line-height: 1.45;
+}
+.progress-steps li .ri { font-size: 15px; margin-top: 1px; color: #9aa0a8; }
+.progress-steps li.current { color: #1f2329; }
+.progress-steps li.current .ri { color: #2468DB; }
+.progress-steps li.done { color: #389e0d; }
+.progress-steps li.done .ri { color: #52c41a; }
 
 .queue-dock {
   border-top: 1px solid #eef0f2; background: #fff; flex-shrink: 0;

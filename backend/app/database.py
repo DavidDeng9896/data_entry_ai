@@ -239,6 +239,12 @@ def list_skills() -> list[dict]:
         return [dict(r) | {"enabled": bool(r["enabled"])} for r in rows]
 
 
+def list_skills_full() -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute("SELECT id, name, content, enabled FROM skills ORDER BY updated_at DESC").fetchall()
+        return [dict(r) | {"enabled": bool(r["enabled"])} for r in rows]
+
+
 def get_skill(skill_id: int) -> dict | None:
     with get_db() as conn:
         row = conn.execute("SELECT id, name, content, enabled FROM skills WHERE id = ?", (skill_id,)).fetchone()
@@ -285,15 +291,21 @@ def set_enabled_skill(skill_id: int | None) -> None:
 # ===== Settings =====
 
 def load_model_settings() -> dict:
+    from .config import DEFAULT_SETTINGS
+    data = {}
     with get_db() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key = 'model'").fetchone()
         if row:
             try:
-                return json.loads(row["value"])
+                data = json.loads(row["value"])
             except Exception:
-                pass
-    from .config import DEFAULT_SETTINGS
-    return dict(DEFAULT_SETTINGS)
+                data = {}
+    if not data:
+        return dict(DEFAULT_SETTINGS)
+    merged = {**DEFAULT_SETTINGS, **data}
+    merged["text_model"] = {**DEFAULT_SETTINGS["text_model"], **data.get("text_model", {})}
+    merged["vision_model"] = {**DEFAULT_SETTINGS["vision_model"], **data.get("vision_model", {})}
+    return merged
 
 
 def save_model_settings(settings: dict) -> None:

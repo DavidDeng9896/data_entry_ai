@@ -13,6 +13,7 @@ class Settings(BaseModel):
     text_model: ModelConfig
     vision_model: ModelConfig
     mock: bool = True
+    parse_max_chars: int = 0  # 0 = 不截断文件解析文本
 
 
 class ColumnDef(BaseModel):
@@ -41,11 +42,17 @@ class RecognizeRequest(BaseModel):
     file_id: str                     # 上传后返回的文件 id
     columns: list[ColumnDef]         # 当前表头
     skill_id: Optional[int] = None   # 可选 skill 模板 id
+    table_name: Optional[str] = None
+    auto_skill: bool = True
 
 
 class RecognizeResponse(BaseModel):
     rows: list[dict]                 # [{field: value, ...}, ...]
     message: str = ""
+    skill_id: Optional[int] = None
+    skill_name: Optional[str] = None
+    skill_auto: bool = False
+    skill_reason: str = ""
 
 
 class ChatMessage(BaseModel):
@@ -59,8 +66,15 @@ class ChatRequest(BaseModel):
     skill_id: Optional[int] = None   # 可选 skill 模板 id
     file_id: Optional[str] = None    # 兼容单文件
     file_ids: list[str] = []         # 多文件（与 file_id 合并去重）
+    table_name: Optional[str] = None
+    auto_skill: bool = True
 
 
 class ChatResponse(BaseModel):
     reply: str                       # 助手对话回复（纯文本）
     rows: list[dict] = []            # 本轮若产生识别结果，返回结构化行数据
+    skill_id: Optional[int] = None
+    skill_name: Optional[str] = None
+    skill_auto: bool = False
+    skill_reason: str = ""
+    intent: str = "recognize"

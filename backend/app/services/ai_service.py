@@ -51,7 +51,7 @@ _BASELINE_PROMPT = """# 导入识别基线
 
 ## 4. 建议勘查流程（灵活执行）
 
-对每一份源，建议按下面顺序想一遍。不必在回复里逐步口述，但内在推理应覆盖这些点。
+对每一份源，建议按下面顺序想一遍。内在推理应覆盖这些点；对话识别时按输出协议写 3–5 条短步骤。
 
 ### 4.1 文件身份（软线索）
 
@@ -101,6 +101,13 @@ _BASELINE_PROMPT = """# 导入识别基线
 3. 过程块中可直接对应目标列的汇总行（如「平均值」行）；
 4. 仍找不到 → 对应列留空。
 
+**多组数值：**
+
+- 优先使用源里已有的 Mean / Average / Avg / 平均值 / 均值；
+- 有 Skill 聚合规则 → 跟 Skill；
+- 没有现成均值，但是同指标、同单位、同条件的重复测定 → 可以算术平均；
+- 对不上（条件/单位不同、不是同一指标）就留空，不要随便取第一个。
+
 若结论块与过程块对同一指标严重不一致：不要擅自平均；优先结论块；仍冲突则留空，并在短说明中点一句。
 
 ### 4.4 实体、行展开与对照
@@ -127,7 +134,8 @@ _BASELINE_PROMPT = """# 导入识别基线
 3. 匹配不上 → `""`；
 4. 需要换算、聚合（多动物均值、%bound→%Fu、选 obs 还是 pred 参数等）时：
    - 有 Skill 规则 → 按规则；
-   - 无 Skill → **留空**（不要猜换算）。
+   - 无 Skill 的单位换算 → **留空**（不要猜换算）；
+   - 无 Skill 的重复测定：仅当同指标、同单位、同条件时可算术平均；优先用源中 Mean/Average/Avg/平均值/均值。
 
 单位：仅当源单位与列标题单位一致，或 Skill 给出换算时才填。单位不明时留空。
 
@@ -140,7 +148,7 @@ _BASELINE_PROMPT = """# 导入识别基线
 - 明确无意义的占位（NA、/、-、空）→ `""`；
 - 带比较符或无穷 → `""`（或按 Skill 规范化）；
 - 数字前后粘着单位 → 尽量剥离单位只留数字；剥离不开 → `""`；
-- 一格多行复测 → 无聚合规则则 `""`（不要随便取第一个，除非 Skill 允许）。
+- 一格多行复测 / 多组数值：优先 Mean/Average/Avg/平均值/均值；有 Skill 跟 Skill；否则仅同指标同单位同条件才算术平均；对不上留空，不要随便取第一个。
 
 ### 4.7 自检
 
@@ -162,7 +170,7 @@ _BASELINE_PROMPT = """# 导入识别基线
 
 - 把某次具体化合物编号、报告编号、具体数值写进「通用规则」当常识；
 - 假设所有同名实验都从同一个 sheet 名取值；
-- 在没有规则时擅自做单位换算或跨动物/跨复测聚合；
+- 在没有规则时擅自做单位换算；把不同条件/不同单位的复测随便取第一个或胡乱平均；
 - 把方法页、试剂页、生分析页默认当成结果写入源；
 - 为了「看起来完整」而填充不确定的列。
 
@@ -182,12 +190,17 @@ _OUTPUT_RECOGNIZE = """## 本次输出协议（一次性识别）
 _OUTPUT_CHAT = """## 本次输出协议（多轮对话）
 
 1. 用户在对话中提出的额外要求或规则（单位换算、列映射、过滤、默认值等）必须记住并遵循；与 Skill 冲突时以更新、更具体的对话约定为准，但仍不得编造数据、不得扩列。
-2. 当用户上传了文件且要求识别时，把数据映射到目标列。
-3. 识别结果格式：先 1–3 句短说明（主源区域、过滤了什么、哪些列因无规则留空），然后单独一行输出：
+2. 当本轮是 **识别**（抽取填表）时：先写 3–5 条短步骤（例如：已加载 Skill / 解析附件 / 定位主源 / 映射列 / 完成行数），然后单独一行输出：
 <<<ROWS>>>
 [JSON 数组，每个元素一行数据，key 用字段名，value 用字符串]
-4. 没有文件或用户只是聊天/补充规则时，正常对话确认即可，不要输出 <<<ROWS>>> 块。
-5. 不要编造数据；源中没有的留空。
+3. 当本轮是 **问答**（解释、确认、补充规则但未要求再识别）时：正常回答即可，不要输出 <<<ROWS>>>，不要抽数覆盖表格。
+4. 源文本若未出现「...(已截断，共」标记，即表示完整读取；不得以「文件被截断」为由把本应填的列留空。
+5. 不要编造数据；源中没有的留空。多组数值优先用源中均值；对不上不要取第一个。
+"""
+
+_OUTPUT_CHAT_QA = """## 本次输出协议（本轮仅问答）
+
+本轮用户在提问或补充规则，**不要识别、不要输出 <<<ROWS>>>、不要给出填表 JSON**。用简短中文回答即可。
 """
 
 
@@ -219,9 +232,15 @@ def _build_system_prompt(
     skill_content: str | None,
     *,
     mode: str = "recognize",
+    intent: str = "recognize",
 ) -> str:
     """组装 system prompt：基线 + 目标列 + 输出协议 + 可选 Skill。"""
-    output = _OUTPUT_CHAT if mode == "chat" else _OUTPUT_RECOGNIZE
+    if mode == "chat" and intent == "chat":
+        output = _OUTPUT_CHAT_QA
+    elif mode == "chat":
+        output = _OUTPUT_CHAT
+    else:
+        output = _OUTPUT_RECOGNIZE
     return (
         f"{_BASELINE_PROMPT.strip()}\n\n"
         f"## 当前目标结果表列定义\n"
@@ -372,52 +391,72 @@ def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | 
     return rows, "" if rows else "模型未返回有效数据，请检查内容或模型配置"
 
 
+def _file_user_message(file_content: str, file_meta: dict | None) -> str:
+    chars = (file_meta or {}).get("chars")
+    if chars is None:
+        chars = len(file_content or "")
+    truncated = bool((file_meta or {}).get("truncated"))
+    if truncated:
+        header = f"已上传文件的解析内容（共 {chars} 字符，含截断标记）。"
+    else:
+        header = (
+            f"完整解析内容，共 {chars} 字符，未截断。"
+            "没有「...(已截断，共」标记时，不得以截断为由留空。"
+        )
+    return f"[{header}]\n{file_content}"
+
+
 def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file_content: str | None,
-                     skill_content: str | None = None) -> tuple[str, list[dict]]:
-    """mock 模式：模拟对话交互；有文件+Skill 时优先按 Skill 从正文抽取"""
-    # 让前端忙碌态（排队 / 立即重导）在 mock 下也有可操作窗口
-    if file_content:
-        time.sleep(1.5)
+                     skill_content: str | None = None, *, intent: str = "recognize") -> tuple[str, list[dict]]:
+    """mock 模式：仅识别意图才抽数填表。"""
     rules = [m.content for m in messages if m.role == "user" and m.content.strip()]
     last = rules[-1] if rules else ""
-    wants_recognize = any(kw in last for kw in ("识别", "导入", "提取", "解析", "填入")) or "帮我" in last
-    # 有附件时，本轮发送即抽取（与「发送 / 立即重导」覆盖表格一致）
+    if intent != "recognize":
+        return f"收到你的问题：{last or '（空）'}。本轮按问答处理，不抽数填表（mock 模式）。", []
     if file_content:
+        time.sleep(1.5)
         simulated = _mock_extract_with_skill(file_content, columns, skill_content)
         if simulated:
             rows, note = simulated
-            extra = f" 已按对话规则处理：{last}" if last and not wants_recognize else ""
-            return f"{note}。已填入 {len(rows)} 行。{extra}".strip(), rows
+            extra = f" 已按对话规则处理：{last}" if last else ""
+            steps = "1. 已加载 Skill\n2. 已解析附件\n3. 已映射列\n4. 完成抽取"
+            return f"{steps}\n{note}。已填入 {len(rows)} 行。{extra}".strip(), rows
         rows = _mock_rows(columns)
         rule_note = f"，已应用你在对话中提出的 {len(rules)} 条规则" if rules else ""
-        reply = f"已识别出 {len(rows)} 行数据{rule_note}（mock 模式，返回演示数据）。已填入表格，可在对话中继续补充规则后重新识别。"
+        reply = (
+            f"1. 解析附件\n2. 映射 {len(columns)} 列\n3. 完成 {len(rows)} 行\n"
+            f"已识别出 {len(rows)} 行数据{rule_note}（mock 模式，返回演示数据）。"
+        )
         return reply, rows
     reply = f"收到：{last or '（空）'}。我会把它作为导入规则记住（mock 模式）。你可以继续补充规则，或上传文件后让我识别。"
     return reply, []
 
 
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
-         file_content: str | None) -> tuple[str, list[dict]]:
+         file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None) -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
-    system = _build_system_prompt(columns, skill_content, mode="chat")
+    system = _build_system_prompt(columns, skill_content, mode="chat", intent=intent)
 
     msgs: list[dict] = [{"role": "system", "content": system}]
     for m in messages:
         msgs.append({"role": m.role, "content": m.content})
 
     if file_content:
-        msgs.append({"role": "user", "content": f"[已上传文件的解析内容]\n{file_content}"})
+        msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
 
     if settings["mock"]:
-        return _mock_chat_reply(messages, columns, file_content, skill_content)
+        return _mock_chat_reply(messages, columns, file_content, skill_content, intent=intent)
 
     cfg = settings["text_model"]
     client = _client(cfg)
     resp = client.chat.completions.create(model=cfg["model"], messages=msgs, temperature=0)
     raw = resp.choices[0].message.content or ""
-    return _split_chat_reply(raw, columns)
+    reply, rows = _split_chat_reply(raw, columns)
+    if intent != "recognize":
+        return reply, []
+    return reply, rows
 
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:
