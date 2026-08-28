@@ -688,6 +688,11 @@ async function runTurn() {
     })
     if (myTurn !== turnSeq) return
     assistant.steps.forEach(s => { s.done = true })
+    await nextTick()
+    if (assistant.steps.length) {
+      await new Promise(r => setTimeout(r, 450))
+    }
+    if (myTurn !== turnSeq) return
     assistant.streaming = false
     assistant.content = res.reply || ''
     if (res.intent) streamIntent.value = res.intent

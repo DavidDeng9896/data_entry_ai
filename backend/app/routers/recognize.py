@@ -1,4 +1,5 @@
 """AI 识别接口：上传文件 → 识别填入表格"""
+import asyncio
 import json
 
 from fastapi import APIRouter, UploadFile, HTTPException
@@ -222,12 +223,21 @@ def chat(req: ChatRequest):
 
 
 @router.post("/chat/stream")
-def chat_stream(req: ChatRequest):
-    def gen():
+async def chat_stream(req: ChatRequest):
+    async def gen():
         try:
             for event, payload in _iter_chat_events(req):
                 yield _sse(event, payload)
+                await asyncio.sleep(0.35 if event == "step" else 0)
         except Exception as e:
             yield _sse("error", {"message": f"对话失败：{str(e)[:300]}"})
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

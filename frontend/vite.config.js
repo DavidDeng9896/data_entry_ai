@@ -13,11 +13,12 @@ export default defineConfig({
         timeout: 0,
         proxyTimeout: 0,
         configure: (proxy) => {
-          proxy.on('proxyRes', (proxyRes, req) => {
-            if (req.url && req.url.includes('/chat/stream')) {
-              proxyRes.headers['cache-control'] = 'no-cache'
-              proxyRes.headers['x-accel-buffering'] = 'no'
-            }
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            proxyRes.headers['cache-control'] = 'no-cache, no-transform'
+            proxyRes.headers['x-accel-buffering'] = 'no'
+            delete proxyRes.headers['content-length']
+            delete proxyRes.headers['content-encoding']
+            if (typeof res.flushHeaders === 'function') res.flushHeaders()
           })
         }
       }
