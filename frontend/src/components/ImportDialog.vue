@@ -34,6 +34,8 @@
               min-height="240"
               show-overflow="title"
               show-header-overflow="title"
+              align="left"
+              header-align="left"
               :data="tableData"
               :column-config="{ resizable: true }"
               :edit-config="{ trigger: 'dblclick', mode: 'cell', showStatus: true, showAsterisk: false }"
@@ -47,16 +49,17 @@
               @edit-closed="onEditClosed"
               @menu-click="onMenuClick"
             >
-              <vxe-column type="seq" title="" width="50" align="center" fixed="left" :edit-render="null"></vxe-column>
+              <vxe-column type="seq" title="#" width="50" align="left" header-align="left" fixed="left" :edit-render="null"></vxe-column>
               <vxe-column
                 v-for="(col, ci) in columns"
                 :key="col.field"
                 :field="col.field"
                 :title="col.title"
                 min-width="120"
+                align="left"
+                header-align="left"
                 :fixed="ci === 0 ? 'left' : ''"
                 :edit-render="editorFor(col)"
-                :align="col.type === 'number' ? 'right' : 'left'"
               >
                 <template #header>
                   <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
@@ -98,65 +101,60 @@
 
       <aside v-show="chatOpen" class="chat-drawer">
         <div class="chat-header">
-          <span class="chat-title"><i class="ri-chat-3-line"></i> AI 导入助手</span>
-          <select v-model="pickedSkill" class="skill-select" title="导入模板 Skill">
-            <option value="">不使用模板</option>
-            <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
-          </select>
-          <button class="icon-btn" type="button" title="收起助手（后台继续执行）" @click="collapseChat">
-            <i class="ri-close-line"></i>
+          <div class="chat-header-main">
+            <span class="chat-title">导入助手</span>
+            <span v-if="chatThinking" class="chat-badge busy"><i class="ri-loader-4-line spin"></i> 识别中 {{ runClock }}</span>
+            <span v-else-if="unreadDone" class="chat-badge done">有新结果</span>
+          </div>
+          <button class="icon-btn" type="button" title="收起（后台继续）" @click="collapseChat">
+            <i class="ri-contract-right-line"></i>
           </button>
         </div>
 
         <div class="chat-scroll" ref="chatMsgs" data-conversation-scroll>
           <div v-if="!chatLog.length && !chatThinking" class="chat-empty">
-            <i class="ri-chat-smile-2-line"></i>
-            <div>上传文件或描述规则，发送后识别填入左侧表格。结果不对可继续对话重新导入。</div>
+            <div class="chat-empty-title">描述规则或上传文件</div>
+            <div class="chat-empty-desc">发送后识别并填入左侧表格；可在下方切换 Skill 模板。</div>
           </div>
 
-          <div v-for="(m, i) in chatLog" :key="i" :class="['node', m.role, { pending: m.pending }]">
-            <div class="node-body">
+          <article
+            v-for="(m, i) in chatLog"
+            :key="i"
+            :class="['turn', m.role, { pending: m.pending }]"
+          >
+            <div class="turn-label">{{ m.role === 'user' ? '你' : '助手' }}</div>
+            <div class="turn-body">
               <template v-if="m.fileChip">
-                <i class="ri-file-text-line"></i> {{ m.content }}
+                <span class="turn-file"><i class="ri-file-text-line"></i>{{ m.content }}</span>
               </template>
               <template v-else>{{ m.content }}</template>
             </div>
-            <div v-if="m.pending" class="node-meta">排队中</div>
-          </div>
-
-          <div v-if="chatThinking" class="node status">
-            <div class="status-row">
-              <i class="ri-loader-4-line spin"></i>
-              <span>正在识别…</span>
-              <span class="run-clock">{{ runClock }}</span>
-            </div>
-          </div>
+            <div v-if="m.pending" class="turn-meta">已排队，等待当前轮结束</div>
+          </article>
         </div>
 
-        <!-- Queue dock -->
         <div v-if="chatQueue.length" class="queue-dock">
           <button type="button" class="queue-head" @click="queueOpen = !queueOpen">
-            <i class="ri-play-list-2-line"></i>
-            <span>{{ chatQueue.length }} 条已排队</span>
+            <i class="ri-time-line"></i>
+            <span>{{ chatQueue.length }} 条排队</span>
             <i :class="queueOpen ? 'ri-arrow-up-s-line' : 'ri-arrow-down-s-line'"></i>
           </button>
           <ul v-if="queueOpen" class="queue-list">
             <li v-for="(q, qi) in chatQueue" :key="q.id">
               <span class="queue-text">{{ q.text }}</span>
-              <button type="button" class="icon-btn sm" title="移出队列" @click="removeQueued(qi)">
+              <button type="button" class="icon-btn sm" title="移出" @click="removeQueued(qi)">
                 <i class="ri-close-line"></i>
               </button>
             </li>
           </ul>
         </div>
 
-        <!-- Harness-style composer card -->
         <div class="composer">
           <div v-if="chatFileId && chatFile" class="composer-chips">
             <span class="file-chip" :title="chatFile.name">
               <i class="ri-file-text-line"></i>
               <span class="file-chip-name">{{ chatFile.name }}</span>
-              <button type="button" class="chip-x" @click="clearFile" title="移除文件">
+              <button type="button" class="chip-x" @click="clearFile" title="移除">
                 <i class="ri-close-line"></i>
               </button>
             </span>
@@ -166,11 +164,17 @@
             class="composer-input"
             rows="3"
             :placeholder="composerPlaceholder"
-            :disabled="false"
             @keydown="onComposerKeydown"
           />
-          <div class="composer-bar">
-            <span v-if="!chatThinking" class="composer-hint">Enter 发送</span>
+          <div class="composer-toolbar">
+            <label class="skill-picker" title="导入 Skill 模板">
+              <i class="ri-book-2-line"></i>
+              <select v-model="pickedSkill" class="skill-select">
+                <option value="">无模板</option>
+                <option v-for="s in skills" :key="s.id" :value="s.id">{{ s.name }}</option>
+              </select>
+              <i class="ri-arrow-down-s-line skill-caret"></i>
+            </label>
             <div class="composer-actions">
               <label class="icon-btn attach" title="上传文件">
                 <input type="file" ref="fileInput" style="display:none" @change="onFileChange"
@@ -181,21 +185,20 @@
                 v-if="chatThinking && canSteer"
                 type="button"
                 class="btn steer"
-                title="打断当前轮，立即按本条指令重新导入"
+                title="打断并按新指令重导"
                 @click="steerNow"
-                :disabled="!canSteer"
               >
-                <i class="ri-skip-forward-line"></i> 立即重导
+                <i class="ri-skip-forward-line"></i>
+                <span>立即重导</span>
               </button>
               <button
                 type="button"
                 class="btn send"
-                :title="chatThinking ? '排队，等本轮结束后自动执行' : '发送'"
+                :title="chatThinking ? '排队' : '发送'"
                 @click="sendOrQueue"
                 :disabled="!canSubmit"
               >
-                <i class="ri-send-plane-line"></i>
-                <span>{{ chatThinking ? '排队' : '发送' }}</span>
+                <i class="ri-arrow-up-line"></i>
               </button>
             </div>
           </div>
@@ -293,9 +296,9 @@ const canSubmit = computed(() => chatThinking.value
   : !!(hasDraft.value || chatFileId.value))
 const canSteer = computed(() => !!(hasDraft.value || chatFileId.value || chatQueue.value.length))
 const composerPlaceholder = computed(() => {
-  if (chatThinking.value) return '本轮进行中：Enter 排队；或点「立即重导」打断并按新指令覆盖表格'
-  if (chatFileId.value) return '继续提要求，或直接发送识别导入'
-  return '输入规则或要求，Enter 发送，Shift+Enter 换行'
+  if (chatThinking.value) return '识别中… Enter 排队，或点「立即重导」打断'
+  if (chatFileId.value) return '补充要求后发送；将按当前 Skill 识别导入'
+  return '描述导入规则或要求，Enter 发送，Shift+Enter 换行'
 })
 
 const noticeIcon = computed(() => ({
@@ -419,7 +422,7 @@ function onMenuClick({ menu, row, column }) {
 
 function isChatTarget(el) {
   const node = el && typeof el.closest === 'function' ? el : el?.parentElement
-  return !!node?.closest?.('.composer, .chat-drawer, .skill-select')
+  return !!node?.closest?.('.composer, .chat-drawer, .skill-picker, .skill-select')
 }
 
 function isTypingElsewhere(el) {
@@ -748,7 +751,7 @@ async function confirmImport() {
   display: flex; flex-direction: column; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
   min-height: 560px; max-height: 92vh;
 }
-.workspace.with-chat .dialog { width: min(900px, calc(96vw - 400px)); }
+.workspace.with-chat .dialog { width: min(880px, calc(96vw - 420px)); }
 
 .dialog-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0; }
 .title { font-size: 16px; font-weight: 600; color: #1a1a1a; }
@@ -778,99 +781,121 @@ async function confirmImport() {
 .badge-dot { background: #52c41a; }
 
 .chat-drawer {
-  width: 380px; flex-shrink: 0; background: #fff; border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08); display: flex; flex-direction: column;
-  overflow: hidden; border: 1px solid #ececec; min-height: 560px; max-height: 92vh;
+  width: 400px; flex-shrink: 0; background: #fff; border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08); display: flex; flex-direction: column;
+  overflow: hidden; border: 1px solid #e8eaed; min-height: 560px; max-height: 92vh;
 }
 .chat-header {
-  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
-  border-bottom: 1px solid #f0f0f0; background: #fff; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid #eef0f2; background: #fff; flex-shrink: 0;
 }
-.chat-title { font-size: 13px; font-weight: 600; color: #2468DB; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.chat-title .ri { font-size: 16px; }
-.skill-select {
-  flex: 1; min-width: 0; border: 1px solid #e5e5e5; border-radius: 4px;
-  padding: 3px 6px; font-size: 12px; color: #555; background: #fff; outline: none;
+.chat-header-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.chat-title { font-size: 14px; font-weight: 600; color: #1a1a1a; white-space: nowrap; }
+.chat-badge {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px;
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap;
 }
-.skill-select:focus { border-color: #2468DB; }
+.chat-badge.busy { color: #2468DB; background: #eef4fd; }
+.chat-badge.done { color: #389e0d; background: #f6ffed; }
+
 .icon-btn {
-  border: none; background: transparent; color: #888; cursor: pointer;
-  width: 28px; height: 28px; border-radius: 6px; display: inline-flex;
-  align-items: center; justify-content: center; font-size: 16px;
+  border: none; background: transparent; color: #8a8f98; cursor: pointer;
+  width: 30px; height: 30px; border-radius: 8px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0;
 }
-.icon-btn:hover { color: #2468DB; background: #eef4fd; }
+.icon-btn:hover { color: #333; background: #f3f4f6; }
 .icon-btn.sm { width: 22px; height: 22px; font-size: 14px; }
-.icon-btn.attach { color: #2468DB; }
+.icon-btn.attach { color: #5f6b7a; }
 
 .chat-scroll {
-  flex: 1; overflow-y: auto; padding: 14px 14px 8px; display: flex; flex-direction: column;
-  gap: 10px; background: #fafbfc; min-height: 0; scrollbar-gutter: stable;
+  flex: 1; overflow-y: auto; padding: 14px 14px 10px; display: flex; flex-direction: column;
+  gap: 14px; background: #f7f8fa; min-height: 0; scrollbar-gutter: stable;
 }
-.chat-empty { text-align: center; color: #b3b3b3; font-size: 12px; padding: 28px 16px; line-height: 1.7; }
-.chat-empty .ri { font-size: 28px; display: block; margin-bottom: 8px; color: #bcd2f5; }
+.chat-empty { padding: 24px 8px; text-align: left; color: #8a8f98; }
+.chat-empty-title { font-size: 13px; font-weight: 500; color: #4a4a4a; margin-bottom: 6px; }
+.chat-empty-desc { font-size: 12px; line-height: 1.65; }
 
-.node { display: flex; flex-direction: column; max-width: 92%; }
-.node.user { align-self: flex-end; align-items: flex-end; }
-.node.assistant, .node.status { align-self: flex-start; }
-.node-body {
-  padding: 8px 12px; border-radius: 12px; font-size: 13px; line-height: 1.65; word-break: break-word;
+.turn { display: flex; flex-direction: column; gap: 4px; }
+.turn-label { font-size: 11px; color: #9aa0a8; line-height: 1; }
+.turn-body {
+  font-size: 13px; line-height: 1.7; color: #2b2f36; word-break: break-word;
+  white-space: pre-wrap;
 }
-.node.user .node-body { background: #2468DB; color: #fff; border-bottom-right-radius: 4px; }
-.node.user.pending .node-body { background: #9bb8ea; }
-.node.assistant .node-body { background: #fff; border: 1px solid #ececec; color: #333; border-bottom-left-radius: 4px; }
-.node-meta { font-size: 11px; color: #8aa4d4; margin-top: 3px; }
-.status-row {
-  display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #5b7db8;
-  background: #eef4fd; border-radius: 8px; padding: 6px 10px;
+.turn.user .turn-body {
+  background: #fff; border: 1px solid #e8eaed; border-radius: 10px; padding: 10px 12px;
 }
-.run-clock { font-variant-numeric: tabular-nums; color: #8aa4d4; }
+.turn.user.pending .turn-body { opacity: 0.72; }
+.turn.assistant .turn-body { padding: 0 2px; }
+.turn-meta { font-size: 11px; color: #8aa4d4; padding-left: 2px; }
+.turn-file {
+  display: inline-flex; align-items: center; gap: 6px; color: #2468DB;
+  background: #eef4fd; border-radius: 6px; padding: 4px 8px; font-size: 12px;
+}
 
-.queue-dock { border-top: 1px solid #f0f0f0; background: #fff; flex-shrink: 0; }
+.queue-dock {
+  border-top: 1px solid #eef0f2; background: #fff; flex-shrink: 0;
+  border-bottom: 1px solid #eef0f2;
+}
 .queue-head {
-  width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 12px;
-  border: none; background: transparent; color: #2468DB; font-size: 12px; cursor: pointer;
+  width: 100%; display: flex; align-items: center; gap: 6px; padding: 8px 14px;
+  border: none; background: transparent; color: #5f6b7a; font-size: 12px; cursor: pointer;
 }
-.queue-head:hover { background: #eef4fd; }
-.queue-list { list-style: none; padding: 0 8px 8px; margin: 0; }
+.queue-head:hover { background: #f7f8fa; color: #2468DB; }
+.queue-list { list-style: none; padding: 0 10px 8px; margin: 0; }
 .queue-list li {
-  display: flex; align-items: center; gap: 6px; padding: 4px 6px;
-  font-size: 12px; color: #555; border-radius: 4px;
+  display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  font-size: 12px; color: #555; border-radius: 6px; background: #f7f8fa;
 }
 .queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .composer {
-  margin: 8px 10px 10px; border: 1px solid #e5e5e5; border-radius: 14px;
+  margin: 10px 12px 12px; border: 1px solid #dfe3e8; border-radius: 14px;
   background: #fff; padding: 10px 10px 8px; flex-shrink: 0;
-  box-shadow: 0 1px 4px rgba(36, 104, 219, 0.06);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
-.composer:focus-within { border-color: #2468DB; }
+.composer:focus-within { border-color: #b8ccf5; box-shadow: 0 0 0 3px rgba(36, 104, 219, 0.08); }
 .composer-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .file-chip {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
-  background: #eef4fd; color: #2468DB; border-radius: 8px; padding: 3px 8px; font-size: 12px;
+  background: #f3f6fb; color: #2b4f8f; border: 1px solid #e3ebf7;
+  border-radius: 8px; padding: 4px 8px; font-size: 12px;
 }
-.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
-.chip-x { border: none; background: transparent; color: #2468DB; cursor: pointer; display: inline-flex; padding: 0; }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.chip-x { border: none; background: transparent; color: #5f7db8; cursor: pointer; display: inline-flex; padding: 0; }
 .composer-input {
-  width: 100%; border: none; outline: none; resize: none; font-size: 13px; line-height: 1.55;
-  min-height: 64px; color: #333; background: transparent;
+  width: 100%; border: none; outline: none; resize: none; font-size: 13px; line-height: 1.6;
+  min-height: 72px; color: #1f2329; background: transparent;
 }
-.composer-input::placeholder { color: #b3b3b3; }
-.composer-bar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; min-height: 32px; }
-.composer-hint { font-size: 11px; color: #b3b3b3; white-space: nowrap; margin-right: auto; }
-.composer-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.composer-input::placeholder { color: #b0b6bf; }
+.composer-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 8px; min-height: 34px;
+}
+.skill-picker {
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 1;
+  height: 32px; padding: 0 8px 0 6px; border-radius: 8px;
+  border: 1px solid #e8eaed; background: #f7f8fa; cursor: pointer; position: relative;
+}
+.skill-picker:hover { border-color: #d5dae0; background: #f3f4f6; }
+.skill-picker .ri-book-2-line { font-size: 15px; color: #6b7280; flex-shrink: 0; }
+.skill-caret { font-size: 14px; color: #9aa0a8; flex-shrink: 0; pointer-events: none; }
+.skill-select {
+  flex: 1; min-width: 0; border: none; background: transparent; outline: none;
+  font-size: 12px; color: #374151; cursor: pointer; appearance: none; padding-right: 2px;
+}
+.composer-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .btn.steer {
-  border-color: #2468DB; color: #2468DB; background: #fff; border-radius: 8px; padding: 5px 10px;
-  white-space: nowrap;
+  border: 1px solid #c5d8f7; color: #2468DB; background: #fff; border-radius: 8px;
+  padding: 0 10px; height: 32px; font-size: 12px; white-space: nowrap;
 }
 .btn.steer:hover { background: #eef4fd; }
-.btn.steer:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn.send {
-  background: #2468DB; border-color: #2468DB; color: #fff; border-radius: 8px; padding: 5px 12px;
-  white-space: nowrap;
+  width: 32px; height: 32px; padding: 0; justify-content: center;
+  background: #2468DB; border: none; color: #fff; border-radius: 8px;
 }
 .btn.send:hover { background: #1d5bc4; }
-.btn.send:disabled { background: #9bb8ea; border-color: #9bb8ea; cursor: not-allowed; }
+.btn.send:disabled { background: #b8ccf5; cursor: not-allowed; }
+.btn.send .ri { font-size: 16px; }
 
 .chat-handle {
   position: absolute; right: -14px; top: 72px; transform: translateX(100%);
@@ -899,8 +924,10 @@ async function confirmImport() {
 .data-table { height: 100%; }
 .table-wrap { flex: 1; min-height: 0; }
 .data-table :deep(.vxe-table--header-wrapper) { background: #fafafa; }
-.data-table :deep(.vxe-header--column) { background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px; }
-.data-table :deep(.vxe-body--column) { font-size: 13px; color: #333; }
+.data-table :deep(.vxe-header--column) { background: #fafafa !important; color: #4a4a4a; font-weight: 500; font-size: 12px; text-align: left !important; }
+.data-table :deep(.vxe-header--column .vxe-cell) { justify-content: flex-start !important; }
+.data-table :deep(.vxe-body--column) { font-size: 13px; color: #333; text-align: left !important; }
+.data-table :deep(.vxe-body--column .vxe-cell) { justify-content: flex-start !important; }
 .data-table :deep(.cell-invalid),
 .data-table :deep(.col--valid-error) { background-color: #ffe9e8 !important; color: #e02b2b; }
 
