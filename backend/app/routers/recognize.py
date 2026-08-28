@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from .. import database as db
 from ..schemas import RecognizeRequest, ChatRequest
 from ..services import file_parser, ai_service
-from ..services.ai_service import friendly_llm_error, split_file_chunks
+from ..services.ai_service import friendly_llm_error
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
 
@@ -32,33 +32,45 @@ def _parse_max_chars() -> int:
         return 0
 
 
-def _load_files_content(file_ids: list[str]) -> tuple[str | None, dict]:
-    meta = {"count": len(file_ids), "chars": 0, "truncated": False}
+def _load_file_items(file_ids: list[str]) -> list[dict]:
+    items: list[dict] = []
     if not file_ids:
-        return None, meta
+        return items
     max_chars = _parse_max_chars()
-    chunks: list[str] = []
-    total = 0
-    truncated = False
     for fid in file_ids:
         try:
+            label = file_parser.original_filename(fid)
             if file_parser.is_image(fid):
-                chunk = f"### {fid}\n（已上传图片，当前以文本模式处理）"
-                chunks.append(chunk)
-                total += len(chunk)
+                text = f"### 文件: {label}\n（已上传图片，当前以文本模式处理）"
+                items.append({
+                    "file_id": fid, "label": label, "text": text,
+                    "chars": len(text), "truncated": False,
+                })
                 continue
             text = file_parser.parse_to_text(fid, max_chars=max_chars)
-            if "已截断" in text:
-                truncated = True
-            if text.strip():
-                chunk = f"### {fid}\n{text}"
-                chunks.append(chunk)
-                total += len(text)
+            wrapped = f"### 文件: {label}\n{text}"
+            items.append({
+                "file_id": fid,
+                "label": label,
+                "text": wrapped,
+                "chars": len(text),
+                "truncated": "已截断" in text,
+            })
         except FileNotFoundError as e:
             raise HTTPException(404, str(e)) from e
-    meta["chars"] = total
-    meta["truncated"] = truncated
-    return ("\n\n---\n\n".join(chunks) if chunks else None), meta
+    return items
+
+
+def _load_files_content(file_ids: list[str]) -> tuple[str | None, dict]:
+    items = _load_file_items(file_ids)
+    meta = {
+        "count": len(file_ids),
+        "chars": sum(i["chars"] for i in items),
+        "truncated": any(i["truncated"] for i in items),
+    }
+    if not items:
+        return None, meta
+    return "\n\n---\n\n".join(f"### {i['file_id']}\n{i['text']}" for i in items), meta
 
 
 def _last_user_text(messages) -> str:
@@ -97,9 +109,14 @@ def _resolve_for_request(req: ChatRequest | RecognizeRequest, file_content: str 
 
 def _run_chat(req: ChatRequest) -> dict:
     file_ids = _resolve_file_ids(req)
-    file_content, file_meta = _load_files_content(file_ids)
+    items = _load_file_items(file_ids)
     last = _last_user_text(req.messages)
     intent = classify_intent(last, has_files=bool(file_ids))
+    file_meta = {
+        "count": len(items),
+        "chars": sum(i["chars"] for i in items),
+        "truncated": any(i["truncated"] for i in items),
+    }
 
     if intent == "chat":
         skill_content = db.get_skill_content(req.skill_id) if req.skill_id else None
@@ -111,23 +128,53 @@ def _run_chat(req: ChatRequest) -> dict:
             "skill_reason": "问答轮次不自动匹配 Skill" if not req.skill_id else "用户指定",
             "skill_content": skill_content,
         }
-    else:
-        resolved = _resolve_for_request(req, file_content, allow_auto=True)
+        joined = "\n\n---\n\n".join(i["text"] for i in items) if items else None
+        reply, rows = ai_service.chat(
+            req.messages, req.columns, resolved.get("skill_content"), joined,
+            intent=intent, file_meta=file_meta, table_name=req.table_name or "",
+        )
+        return {"reply": reply, "rows": rows, "intent": intent, "file_meta": file_meta, **_skill_meta_payload(resolved)}
 
-    reply, rows = ai_service.chat(
-        req.messages,
-        req.columns,
-        resolved.get("skill_content"),
-        file_content,
-        intent=intent,
-        file_meta=file_meta,
-    )
+    if not items:
+        resolved = _resolve_for_request(req, "", allow_auto=True)
+        reply, rows = ai_service.chat(
+            req.messages, req.columns, resolved.get("skill_content"), None,
+            intent=intent, file_meta=file_meta, table_name=req.table_name or "",
+        )
+        return {"reply": reply, "rows": rows, "intent": intent, "file_meta": file_meta, **_skill_meta_payload(resolved)}
+
+    all_rows: list[dict] = []
+    notes: list[str] = []
+    resolved_list: list[dict] = []
+    resolved = _resolve_for_request(req, items[0]["text"], allow_auto=True)
+    n = len(items)
+    for i, item in enumerate(items, 1):
+        resolved = _resolve_for_request(req, item["text"], allow_auto=True)
+        resolved_list.append(resolved)
+        reply, rows = ai_service.chat(
+            req.messages, req.columns, resolved.get("skill_content"), item["text"],
+            intent=intent,
+            file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
+            table_name=req.table_name or "",
+        )
+        sk = resolved.get("skill_name") or "基线"
+        notes.append(f"附件 {i}/{n}（{item.get('label') or item['file_id']}）：{sk}，{len(rows or [])} 行")
+        all_rows.extend(rows or [])
+    names = []
+    for r in resolved_list:
+        nme = r.get("skill_name")
+        if nme and nme not in names:
+            names.append(nme)
+    meta = _skill_meta_payload(resolved)
+    if n > 1:
+        meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
+        meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     return {
-        "reply": reply,
-        "rows": rows,
+        "reply": "逐文件识别后合并：\n" + "\n".join(notes) + f"\n合计 {len(all_rows)} 行。",
+        "rows": all_rows,
         "intent": intent,
         "file_meta": file_meta,
-        **_skill_meta_payload(resolved),
+        **meta,
     }
 
 
@@ -158,47 +205,79 @@ async def _aiter_chat_events(req: ChatRequest):
         yield "done", {k: result[k] for k in ("reply", "rows", "intent", "skill_id", "skill_name", "skill_auto", "skill_reason")}
         return
 
-    file_content, file_meta = await asyncio.to_thread(_load_files_content, file_ids)
-    resolved = await asyncio.to_thread(
-        lambda: _resolve_for_request(req, file_content, allow_auto=True)
-    )
-    if resolved.get("skill_name"):
-        yield "step", {"text": f"已加载 Skill：{resolved['skill_name']}", "intent": intent}
-    else:
+    items = await asyncio.to_thread(_load_file_items, file_ids)
+    file_meta = {
+        "count": len(items),
+        "chars": sum(i["chars"] for i in items),
+        "truncated": any(i["truncated"] for i in items),
+    }
+    n = len(items)
+    yield "step", {"text": f"读取 {n} 个附件，将逐个识别后合并", "intent": intent}
+
+    all_rows: list = []
+    notes: list[str] = []
+    resolved_list: list[dict] = []
+    resolved = {
+        "skill_id": None, "skill_name": None, "skill_auto": True,
+        "skill_reason": "", "skill_content": None,
+    }
+    for i, item in enumerate(items, 1):
+        label = item.get("label") or item["file_id"]
+        yield "step", {"text": f"附件 {i}/{n}：{label}"}
+        resolved = await asyncio.to_thread(
+            lambda it=item: _resolve_for_request(req, it["text"], allow_auto=True)
+        )
+        resolved_list.append(resolved)
+        skill_txt = resolved.get("skill_name") or "仅基线"
+        yield "step", {"text": f"附件 {i}/{n} 匹配 {skill_txt}（{item['chars']} 字）"}
+        reply, rows = None, None
+        async for kind, payload in _run_in_thread(
+            ai_service.chat,
+            req.messages,
+            req.columns,
+            resolved.get("skill_content"),
+            item["text"],
+            intent=intent,
+            file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
+            table_name=req.table_name or "",
+        ):
+            if kind == "ping":
+                yield "ping", {}
+            else:
+                reply, rows = payload
+        n_rows = len(rows or [])
+        yield "step", {"text": f"附件 {i}/{n} 抽出 {n_rows} 行"}
+        if reply:
+            notes.append(f"附件 {i}/{n}（{label}）：{n_rows} 行。{reply}")
+        all_rows.extend(rows or [])
+
+    if not items:
         yield "step", {"text": "未指定模板，仅用基线", "intent": intent}
+        async for kind, payload in _run_in_thread(
+            ai_service.chat, req.messages, req.columns, None, None,
+            intent=intent, file_meta=file_meta, table_name=req.table_name or "",
+        ):
+            if kind == "ping":
+                yield "ping", {}
+            else:
+                notes.append(payload[0])
+                all_rows.extend(payload[1] or [])
 
-    n_files = file_meta.get("count") or 0
-    chars = file_meta.get("chars") or 0
-    if file_meta.get("truncated"):
-        yield "step", {"text": f"解析 {n_files} 个附件（共 {chars} 字符，已截断）"}
-    else:
-        yield "step", {"text": f"解析 {n_files} 个附件（共 {chars} 字符，完整读取）"}
-
-    yield "step", {"text": f"映射 {len(req.columns)} 列"}
-    n_chunks = len(split_file_chunks(file_content or ""))
-    if n_chunks > 1:
-        yield "step", {"text": f"文件较大，分 {n_chunks} 段送给模型（避免网关超时）"}
-
-    reply, rows = None, None
-    async for kind, payload in _run_in_thread(
-        ai_service.chat,
-        req.messages,
-        req.columns,
-        resolved.get("skill_content"),
-        file_content,
-        intent=intent,
-        file_meta=file_meta,
-    ):
-        if kind == "ping":
-            yield "ping", {}
-        else:
-            reply, rows = payload
-    yield "step", {"text": f"完成 {len(rows or [])} 行"}
+    yield "step", {"text": f"合并完成 {len(all_rows)} 行"}
+    names = []
+    for r in resolved_list:
+        nme = r.get("skill_name")
+        if nme and nme not in names:
+            names.append(nme)
+    meta = _skill_meta_payload(resolved)
+    if n > 1:
+        meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
+        meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     yield "done", {
-        "reply": reply,
-        "rows": rows or [],
+        "reply": "逐文件识别后合并：\n" + "\n".join(notes) + f"\n合计 {len(all_rows)} 行。",
+        "rows": all_rows,
         "intent": intent,
-        **_skill_meta_payload(resolved),
+        **meta,
     }
 
 
@@ -229,7 +308,10 @@ def run(req: RecognizeRequest):
         else:
             if not (file_content or "").strip():
                 return {"rows": [], "message": "未能从文件中解析出内容", **_skill_meta_payload(resolved)}
-            rows, message = ai_service.recognize_text(file_content, req.columns, resolved.get("skill_content"))
+            rows, message = ai_service.recognize_text(
+                file_content, req.columns, resolved.get("skill_content"),
+                table_name=getattr(req, "table_name", None) or "",
+            )
         return {"rows": rows, "message": message, **_skill_meta_payload(resolved)}
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))

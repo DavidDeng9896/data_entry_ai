@@ -208,6 +208,15 @@
             </label>
             <div class="composer-actions">
               <button
+                v-if="chatThinking"
+                type="button"
+                class="btn steer"
+                title="停止当前识别"
+                @click="abortTurn"
+              >
+                <span>停止</span>
+              </button>
+              <button
                 v-if="chatThinking && canSteer"
                 type="button"
                 class="btn steer"
@@ -646,6 +655,18 @@ function removeQueued(index) {
 function settlePending(text) {
   const m = chatLog.value.find(x => x.pending && x.content === text)
   if (m) m.pending = false
+}
+
+function abortTurn() {
+  turnSeq += 1
+  abortCtrl.value?.abort()
+  chatThinking.value = false
+  stopClock()
+  const last = chatLog.value[chatLog.value.length - 1]
+  if (last && last.streaming) {
+    last.streaming = false
+    last.content = last.content || '已停止'
+  }
 }
 
 function skillPayload() {

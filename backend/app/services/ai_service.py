@@ -11,6 +11,7 @@ from openai import OpenAI
 from .. import database as db
 from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
+from .pk_extract import focus_content_for_model, mock_extract_pk
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
 _LLM_CHUNK_CHARS = 24000
@@ -364,9 +365,13 @@ def _fill_columns(row: dict, columns: list[ColumnDef]) -> dict:
 
 
 def _mock_extract_with_skill(
-    content: str, columns: list[ColumnDef], skill_content: str | None
+    content: str, columns: list[ColumnDef], skill_content: str | None,
+    table_name: str = "",
 ) -> tuple[list[dict], str] | None:
     """mock 下按 Skill 线索从解析正文做保守抽取；抽不到则返回 None 走兜底演示数据。"""
+    pk = mock_extract_pk(content, columns, table_name=table_name)
+    if pk:
+        return pk
     if not content or not skill_content:
         return None
     fields = {c.field for c in columns}
@@ -434,7 +439,7 @@ def _client(cfg: dict) -> OpenAI:
     return OpenAI(
         base_url=cfg["base_url"],
         api_key=cfg["api_key"] or "sk-empty",
-        timeout=180.0,
+        timeout=45.0,
         max_retries=0,
     )
 
@@ -472,10 +477,11 @@ def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: 
     raise last or RuntimeError("模型调用失败")
 
 
-def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | None) -> tuple[list[dict], str]:
+def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | None,
+                   table_name: str = "") -> tuple[list[dict], str]:
     settings = db.load_model_settings()
     if settings["mock"]:
-        simulated = _mock_extract_with_skill(content, columns, skill_content)
+        simulated = _mock_extract_with_skill(content, columns, skill_content, table_name=table_name)
         if simulated:
             return simulated
         return _mock_rows(columns), "mock 模式返回演示数据（在设置中关闭 mock 并配置 API key 后走真实模型）"
@@ -510,15 +516,16 @@ def _file_user_message(file_content: str, file_meta: dict | None) -> str:
 
 
 def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file_content: str | None,
-                     skill_content: str | None = None, *, intent: str = "recognize") -> tuple[str, list[dict]]:
+                     skill_content: str | None = None, *, intent: str = "recognize",
+                     table_name: str = "") -> tuple[str, list[dict]]:
     """mock 模式：仅识别意图才抽数填表。"""
     rules = [m.content for m in messages if m.role == "user" and m.content.strip()]
     last = rules[-1] if rules else ""
     if intent != "recognize":
         return f"收到你的问题：{last or '（空）'}。本轮按问答处理，不抽数填表（mock 模式）。", []
     if file_content:
-        time.sleep(1.5)
-        simulated = _mock_extract_with_skill(file_content, columns, skill_content)
+        time.sleep(0.05)
+        simulated = _mock_extract_with_skill(file_content, columns, skill_content, table_name=table_name)
         if simulated:
             rows, note = simulated
             extra = f" 已按对话规则处理：{last}" if last else ""
@@ -536,7 +543,8 @@ def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file
 
 
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
-         file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None) -> tuple[str, list[dict]]:
+         file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
+         table_name: str = "") -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
@@ -545,6 +553,13 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     msgs: list[dict] = [{"role": "system", "content": system}]
     for m in messages:
         msgs.append({"role": m.role, "content": m.content})
+
+    if file_content and intent != "chat":
+        focused = focus_content_for_model(file_content)
+        if focused:
+            file_content = focused
+            if file_meta is not None:
+                file_meta = {**file_meta, "chars": len(focused)}
 
     if file_content:
         if intent == "chat":
@@ -556,7 +571,10 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
             else:
                 # 分页调用，合并行
                 if settings["mock"]:
-                    return _mock_chat_reply(messages, columns, file_content, skill_content, intent=intent)
+                    return _mock_chat_reply(
+                        messages, columns, file_content, skill_content,
+                        intent=intent, table_name=table_name,
+                    )
                 cfg = settings["text_model"]
                 client = _client(cfg)
                 merged_rows: list[dict] = []
@@ -579,7 +597,10 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                 return reply, merged_rows
 
     if settings["mock"]:
-        return _mock_chat_reply(messages, columns, file_content, skill_content, intent=intent)
+        return _mock_chat_reply(
+            messages, columns, file_content, skill_content,
+            intent=intent, table_name=table_name,
+        )
 
     cfg = settings["text_model"]
     client = _client(cfg)

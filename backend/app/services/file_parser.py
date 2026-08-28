@@ -26,7 +26,18 @@ def save_upload(filename: str, content: bytes) -> dict:
     safe_name = f"{file_id}{ext}"
     path = UPLOAD_DIR / safe_name
     path.write_bytes(content)
+    (UPLOAD_DIR / f".name-{file_id}").write_text(filename, encoding="utf-8")
     return {"file_id": file_id, "filename": filename, "ext": ext, "path": str(path)}
+
+
+def original_filename(file_id: str) -> str:
+    meta = UPLOAD_DIR / f".name-{file_id}"
+    if meta.exists():
+        name = meta.read_text(encoding="utf-8").strip()
+        if name:
+            return name
+    path = _get_path(file_id)
+    return path.name
 
 
 def _get_path(file_id: str) -> Path:
