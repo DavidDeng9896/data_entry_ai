@@ -88,12 +88,16 @@
             <button class="btn ghost" @click="removeCurrentRow"><i class="ri-delete-bin-line"></i> 删除行</button>
             <button class="btn ghost" @click="clearInvalid"><i class="ri-eraser-line"></i> 清除标红</button>
             <span class="invalid-count" v-if="invalidCount > 0"><i class="ri-error-warning-line"></i> {{ invalidCount }} 个单元格待修正</span>
+            <span class="conflict-count" v-if="conflictCount > 0"><i class="ri-alert-line"></i> {{ conflictCount }} 个单元格分页冲突（黄）</span>
           </div>
         </div>
 
         <div class="dialog-footer">
           <button class="btn" @click="$emit('close')">取消</button>
-          <button class="btn primary" @click="confirmImport"><i class="ri-check-line"></i> 确认导入</button>
+          <button class="btn primary" :disabled="confirming" @click="confirmImport">
+            <i :class="confirming ? 'ri-loader-4-line spin' : 'ri-check-line'"></i>
+            {{ confirming ? '写入中…' : '确认导入' }}
+          </button>
         </div>
       </div>
 
@@ -301,8 +305,13 @@ let turnSeq = 0
 const notice = ref('')
 const noticeType = ref('info')
 const invalidMap = ref(new Map())
+const confirming = ref(false)
+const lastSkillName = ref('')
 
 const invalidCount = computed(() => invalidMap.value.size)
+const conflictCount = computed(() =>
+  tableData.value.reduce((n, row) => n + Object.keys(row?._conflicts || {}).length, 0)
+)
 const lastSheetKey = ref('')
 const invalidPaint = ref(0)
 const keyboardConfig = {
@@ -402,6 +411,7 @@ function cellClassName({ row, column }) {
   const rowIndex = tableData.value.indexOf(row)
   if (rowIndex < 0) return ''
   if (invalidMap.value.has(`${rowIndex}::${column.field}`)) return 'cell-invalid'
+  if (row?._conflicts && row._conflicts[column.field]) return 'cell-conflict'
   return ''
 }
 
@@ -719,9 +729,11 @@ async function runTurn() {
     if (res.intent) streamIntent.value = res.intent
     if (res.intent !== 'chat' && res.rows && res.rows.length) {
       applyRows(res.rows, { replace: true })
+      lastSkillName.value = res.skill_name || ''
       const skillHint = res.skill_name ? `（Skill：${res.skill_name}）` : ''
-      notice.value = `AI 识别完成，填入 ${res.rows.length} 行${skillHint}`
-      noticeType.value = 'success'
+      const conflictHint = conflictCount.value ? `，${conflictCount.value} 格分页冲突已标黄` : ''
+      notice.value = `AI 识别完成，填入 ${res.rows.length} 行${skillHint}${conflictHint}`
+      noticeType.value = conflictCount.value ? 'warning' : 'success'
       validateFilled()
       if (!chatOpen.value) unreadDone.value = true
     }
@@ -770,6 +782,7 @@ function applyRows(rows, { replace = true } = {}) {
     if (idx >= tableData.value.length) addRows(1)
     const target = tableData.value[idx]
     for (const c of columns.value) target[c.field] = row[c.field] ?? ''
+    target._conflicts = row._conflicts && Object.keys(row._conflicts).length ? row._conflicts : undefined
     idx++
   }
 }
@@ -825,9 +838,36 @@ async function confirmImport() {
     noticeType.value = 'warning'
     return
   }
-  notice.value = `导入校验通过，共 ${filled.length} 行数据`
-  noticeType.value = 'success'
-  emit('imported', filled)
+  const conflicts = []
+  for (const row of filled) {
+    const cmap = row._conflicts || {}
+    for (const [field, values] of Object.entries(cmap)) {
+      conflicts.push({
+        cpds_id: row.cpds_id || '',
+        field,
+        kept: row[field],
+        others: Array.isArray(values) ? values.slice(1) : values,
+      })
+    }
+  }
+  confirming.value = true
+  try {
+    const res = await api.commitImport(props.tableId, {
+      rows: filled.map(({ _conflicts, ...rest }) => rest),
+      source_files: chatAttachments.value.map(a => a.name).filter(Boolean),
+      skill_name: lastSkillName.value,
+      conflicts,
+    })
+    notice.value = `已写入结果表 ${res.row_count} 行`
+    noticeType.value = 'success'
+    emit('imported', { rows: filled, batch_id: res.batch_id, row_count: res.row_count })
+    emit('close')
+  } catch (e) {
+    notice.value = e.message || '写入失败'
+    noticeType.value = 'error'
+  } finally {
+    confirming.value = false
+  }
 }
 </script>
 <style scoped>
@@ -1056,6 +1096,8 @@ async function confirmImport() {
 }
 .data-table :deep(.vxe-body--column .vxe-cell) { justify-content: flex-start !important; }
 .data-table :deep(.cell-invalid) { background-color: #ffe9e8 !important; color: #e02b2b; }
+.data-table :deep(.cell-conflict) { background-color: #fff7d6 !important; }
+.conflict-count { color: #d48806; font-size: 12px; margin-left: 8px; }
 
 .required-mark::after { content: ' *'; color: #e02b2b; }
 .col-info { color: #c0c0c0; margin-left: 4px; cursor: help; font-size: 13px; }

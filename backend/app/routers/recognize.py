@@ -1,6 +1,7 @@
 """AI 识别接口：上传文件 → 识别填入表格"""
 import asyncio
 import json
+import queue
 
 from fastapi import APIRouter, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
@@ -11,6 +12,7 @@ from ..services import file_parser, ai_service
 from ..services.ai_service import friendly_llm_error
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
+from ..services.row_merge import merge_extracted_rows
 
 router = APIRouter(prefix="/api/recognize", tags=["recognize"])
 
@@ -158,7 +160,7 @@ def _run_chat(req: ChatRequest) -> dict:
             table_name=req.table_name or "",
         )
         sk = resolved.get("skill_name") or "基线"
-        notes.append(f"附件 {i}/{n}（{item.get('label') or item['file_id']}）：{sk}，{len(rows or [])} 行")
+        notes.append(f"附件 {i}/{n}（{item.get('label') or item['file_id']}）：{sk}，抽出 {len(rows or [])} 行")
         all_rows.extend(rows or [])
     names = []
     for r in resolved_list:
@@ -169,8 +171,15 @@ def _run_chat(req: ChatRequest) -> dict:
     if n > 1:
         meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
+    raw_n = len(all_rows)
+    all_rows, conflicts = merge_extracted_rows(all_rows, key_field="cpds_id")
+    extra = ""
+    if len(all_rows) < raw_n:
+        extra += f"\n已按化合物 ID 合并：{raw_n} 行 → {len(all_rows)} 行。"
+    if conflicts:
+        extra += f"\n有 {len(conflicts)} 处取值不一致，已标黄，请核对后再确认导入。"
     return {
-        "reply": "逐文件识别后合并：\n" + "\n".join(notes) + f"\n合计 {len(all_rows)} 行。",
+        "reply": "逐文件识别后合并：\n" + "\n".join(notes) + f"\n合计 {len(all_rows)} 行。" + extra,
         "rows": all_rows,
         "intent": intent,
         "file_meta": file_meta,
@@ -186,6 +195,36 @@ async def _run_in_thread(fn, *args, **kwargs):
             await asyncio.wait_for(asyncio.shield(task), timeout=10)
         except asyncio.TimeoutError:
             continue
+    yield "result", task.result()
+
+
+async def _run_chat_with_progress(*args, **kwargs):
+    progress_q: queue.Queue = queue.Queue()
+
+    def on_progress(text: str):
+        progress_q.put(text)
+
+    kwargs = {**kwargs, "on_progress": on_progress}
+    task = asyncio.create_task(asyncio.to_thread(ai_service.chat, *args, **kwargs))
+    while not task.done():
+        had = False
+        while True:
+            try:
+                yield "step", {"text": progress_q.get_nowait()}
+                had = True
+            except queue.Empty:
+                break
+        if not had:
+            yield "ping", {}
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+    while True:
+        try:
+            yield "step", {"text": progress_q.get_nowait()}
+        except queue.Empty:
+            break
     yield "result", task.result()
 
 
@@ -238,8 +277,7 @@ async def _aiter_chat_events(req: ChatRequest):
         skill_txt = resolved.get("skill_name") or "仅基线"
         yield "step", {"text": f"附件 {i}/{n} 匹配 {skill_txt}（{item['chars']} 字）"}
         reply, rows = None, None
-        async for kind, payload in _run_in_thread(
-            ai_service.chat,
+        async for kind, payload in _run_chat_with_progress(
             req.messages,
             req.columns,
             resolved.get("skill_content"),
@@ -250,12 +288,14 @@ async def _aiter_chat_events(req: ChatRequest):
         ):
             if kind == "ping":
                 yield "ping", {}
+            elif kind == "step":
+                yield "step", payload
             else:
                 reply, rows = payload
         n_rows = len(rows or [])
         yield "step", {"text": f"附件 {i}/{n} 抽出 {n_rows} 行"}
         if reply:
-            notes.append(f"附件 {i}/{n}（{label}）：{n_rows} 行。{reply}")
+            notes.append(f"附件 {i}/{n}（{label}）：{reply}")
         all_rows.extend(rows or [])
 
     if not items:
@@ -270,6 +310,8 @@ async def _aiter_chat_events(req: ChatRequest):
                 notes.append(payload[0])
                 all_rows.extend(payload[1] or [])
 
+    raw_n = len(all_rows)
+    all_rows, conflicts = merge_extracted_rows(all_rows, key_field="cpds_id")
     yield "step", {"text": f"合并完成 {len(all_rows)} 行"}
     names = []
     for r in resolved_list:
@@ -280,8 +322,13 @@ async def _aiter_chat_events(req: ChatRequest):
     if n > 1:
         meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
+    extra = ""
+    if len(all_rows) < raw_n:
+        extra += f"\n已按化合物 ID 合并：{raw_n} 行 → {len(all_rows)} 行。"
+    if conflicts:
+        extra += f"\n有 {len(conflicts)} 处取值不一致，已标黄，请核对后再确认导入。"
     yield "done", {
-        "reply": "逐文件识别后合并：\n" + "\n".join(notes) + f"\n合计 {len(all_rows)} 行。",
+        "reply": ("\n\n".join(notes) + extra).strip() or f"合计 {len(all_rows)} 行。",
         "rows": all_rows,
         "intent": intent,
         **meta,

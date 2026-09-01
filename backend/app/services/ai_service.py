@@ -12,6 +12,7 @@ from .. import database as db
 from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 from .pk_extract import focus_content_for_model, mock_extract_pk
+from .row_merge import merge_extracted_rows, summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
 _LLM_CHUNK_CHARS = 24000
@@ -588,7 +589,7 @@ def _is_pk_target(table_name: str, columns: list[ColumnDef]) -> bool:
 
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
          file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
-         table_name: str = "") -> tuple[str, list[dict]]:
+         table_name: str = "", on_progress=None) -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
@@ -624,10 +625,11 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                     )
                 cfg = settings["text_model"]
                 client = _client(cfg)
-                merged_rows: list[dict] = []
-                notes: list[str] = []
+                chunk_results: list[tuple[str, list[dict]]] = []
                 total = len(chunks)
                 for i, chunk in enumerate(chunks, 1):
+                    if on_progress:
+                        on_progress(f"第 {i}/{total} 段识别中（共 {total} 段）")
                     piece_msgs = list(msgs) + [{
                         "role": "user",
                         "content": (
@@ -638,11 +640,17 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                     }]
                     raw = _complete(client, cfg["model"], piece_msgs)
                     note, rows = _split_chat_reply(raw, columns)
-                    if note:
-                        notes.append(note)
-                    merged_rows.extend(rows)
-                reply = "\n".join(notes).strip() or f"已分页识别 {len(merged_rows)} 行（{total} 段）。"
-                return reply, merged_rows
+                    chunk_results.append((note, rows or []))
+                raw_rows = [r for _, rs in chunk_results for r in rs]
+                merged, conflicts = merge_extracted_rows(raw_rows, key_field="cpds_id")
+                reply = summarize_chunk_notes(chunk_results)
+                if len(merged) < len(raw_rows):
+                    reply += f"\n已按化合物 ID 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
+                if conflicts:
+                    reply += (
+                        f"\n有 {len(conflicts)} 处分页取值不一致，已保留先出现的值并在表中标黄，请核对后再确认导入。"
+                    )
+                return reply, merged
 
     if settings["mock"]:
         return _mock_chat_reply(
@@ -652,11 +660,16 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
 
     cfg = settings["text_model"]
     client = _client(cfg)
+    if on_progress:
+        on_progress("正在调用模型识别…")
     raw = _complete(client, cfg["model"], msgs)
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []
-    return reply, rows
+    merged, conflicts = merge_extracted_rows(rows or [], key_field="cpds_id")
+    if conflicts:
+        reply = (reply or "") + f"\n有 {len(conflicts)} 处重复行取值不一致，已合并并标黄。"
+    return reply, merged
 
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:

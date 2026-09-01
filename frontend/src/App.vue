@@ -23,6 +23,7 @@
           </div>
           <span class="table-count" v-if="tables.length">{{ tables.length }} 张表</span>
         </div>
+        <div v-if="toast" class="toast">{{ toast }}</div>
 
         <div class="cards" v-if="tables.length">
           <div class="card" v-for="t in tables" :key="t.id">
@@ -35,9 +36,11 @@
             </div>
             <div class="card-meta">
               <span class="meta-chip"><i class="ri-layout-column-line"></i> {{ t.column_count }} 列</span>
+              <span class="meta-chip" v-if="t.row_count"><i class="ri-database-2-line"></i> {{ t.row_count }} 行已入库</span>
             </div>
             <div class="card-actions">
               <button class="btn primary" @click="openImport(t)"><i class="ri-sparkling-2-line"></i> AI 导入</button>
+              <button class="btn ghost" @click="openData(t)" title="查看已导入数据"><i class="ri-table-line"></i> 数据</button>
               <button class="btn ghost" @click="openColumns(t)" title="表头设置"><i class="ri-settings-3-line"></i> 表头</button>
               <button class="btn ghost icon-only" @click="renameTable(t)" title="重命名"><i class="ri-edit-line"></i></button>
               <button class="btn ghost icon-only" @click="copyTable(t)" title="复制建新表"><i class="ri-file-copy-line"></i></button>
@@ -77,6 +80,13 @@
 
     <!-- 设置弹窗 -->
     <SettingsDialog v-if="showSettings" @close="showSettings = false" />
+
+    <TableDataDialog
+      v-if="showData && activeTable"
+      :table-id="activeTable.id"
+      :table-name="activeTable.name"
+      @close="showData = false"
+    />
   </div>
 </template>
 
@@ -87,13 +97,16 @@ import ImportDialog from './components/ImportDialog.vue'
 import ColumnSettings from './components/ColumnSettings.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import TableCreateDialog from './components/TableCreateDialog.vue'
+import TableDataDialog from './components/TableDataDialog.vue'
 
 const tables = ref([])
 const showCreate = ref(false)
 const showImport = ref(false)
 const showColumns = ref(false)
 const showSettings = ref(false)
+const showData = ref(false)
 const activeTable = ref(null)
+const toast = ref('')
 
 onMounted(loadTables)
 
@@ -125,8 +138,16 @@ async function onColumnsSaved() {
   }
 }
 
-function onImported(rows) {
-  console.log('导入成功行数：', rows.length)
+function openData(t) {
+  activeTable.value = t
+  showData.value = true
+}
+
+async function onImported(payload) {
+  await loadTables()
+  const n = payload?.row_count ?? payload?.rows?.length ?? 0
+  toast.value = `已写入 ${n} 行，可在卡片上点「数据」回看`
+  setTimeout(() => { toast.value = '' }, 4000)
 }
 
 async function renameTable(t) {
@@ -191,7 +212,7 @@ async function deleteTable(t) {
 .card-info { flex: 1; min-width: 0; }
 .card-title { font-size: 15px; font-weight: 600; color: #1a1a1a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-desc { color: #999; font-size: 12px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card-meta { margin-top: 12px; }
+.card-meta { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
 .meta-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #888; background: #fafafa; border-radius: 4px; padding: 3px 8px; }
 .meta-chip .ri { font-size: 13px; color: #2468DB; }
 .card-actions { display: flex; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #f5f5f5; }
@@ -202,6 +223,11 @@ async function deleteTable(t) {
 .empty-state .ri-inbox-line { font-size: 48px; }
 .empty-title { font-size: 15px; color: #888; margin-top: 12px; }
 .empty-desc { font-size: 13px; color: #bbb; margin: 6px 0 18px; }
+
+.toast {
+  margin-bottom: 12px; background: #f6ffed; color: #389e0d;
+  border-radius: 4px; padding: 8px 12px; font-size: 13px;
+}
 
 .btn { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #e5e5e5; background: #fff; border-radius: 4px; padding: 5px 12px; font-size: 13px; color: #4a4a4a; transition: all 0.12s; }
 .btn:hover { border-color: #c9c9c9; }

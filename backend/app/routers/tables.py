@@ -31,6 +31,13 @@ class ColumnsUpdate(BaseModel):
     columns: list[ColumnIn]
 
 
+class ImportCommit(BaseModel):
+    rows: list[dict]
+    source_files: list[str] = []
+    skill_name: str = ""
+    conflicts: list[dict] = []
+
+
 @router.get("")
 def list_tables():
     return db.list_tables()
@@ -94,3 +101,31 @@ def save_columns(table_id: int, body: ColumnsUpdate):
         return {"ok": True}
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@router.post("/{table_id}/imports")
+def commit_import(table_id: int, body: ImportCommit):
+    try:
+        return db.commit_import(
+            table_id,
+            body.rows,
+            source_files=body.source_files,
+            skill_name=body.skill_name,
+            conflicts=body.conflicts,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/{table_id}/imports")
+def list_imports(table_id: int):
+    if not db.get_table(table_id):
+        raise HTTPException(404, "结果表不存在")
+    return db.list_import_batches(table_id)
+
+
+@router.get("/{table_id}/rows")
+def list_rows(table_id: int):
+    if not db.get_table(table_id):
+        raise HTTPException(404, "结果表不存在")
+    return db.list_imported_rows(table_id)

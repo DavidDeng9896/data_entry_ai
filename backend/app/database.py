@@ -2,6 +2,7 @@
 库文件：data/data_entry.db；首次启动自动建表并从旧 json/md 文件迁移。
 """
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -39,6 +40,22 @@ CREATE TABLE IF NOT EXISTS skills (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS import_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_id INTEGER NOT NULL REFERENCES result_tables(id) ON DELETE CASCADE,
+    source_files TEXT NOT NULL DEFAULT '[]',
+    skill_name TEXT NOT NULL DEFAULT '',
+    row_count INTEGER NOT NULL DEFAULT 0,
+    conflicts TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS imported_rows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    table_id INTEGER NOT NULL REFERENCES result_tables(id) ON DELETE CASCADE,
+    batch_id INTEGER NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL
 );
 """
 
@@ -139,8 +156,12 @@ def _migrate_settings(conn) -> None:
 def list_tables() -> list[dict]:
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT t.id, t.name, t.description, t.created_at, COUNT(c.id) AS column_count "
-            "FROM result_tables t LEFT JOIN columns c ON c.table_id = t.id "
+            "SELECT t.id, t.name, t.description, t.created_at, "
+            "COUNT(DISTINCT c.id) AS column_count, "
+            "COUNT(DISTINCT r.id) AS row_count "
+            "FROM result_tables t "
+            "LEFT JOIN columns c ON c.table_id = t.id "
+            "LEFT JOIN imported_rows r ON r.table_id = t.id "
             "GROUP BY t.id ORDER BY t.created_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
@@ -178,6 +199,8 @@ def update_table(table_id: int, name: str | None = None, description: str | None
 
 def delete_table(table_id: int) -> None:
     with get_db() as conn:
+        conn.execute("DELETE FROM imported_rows WHERE table_id = ?", (table_id,))
+        conn.execute("DELETE FROM import_batches WHERE table_id = ?", (table_id,))
         conn.execute("DELETE FROM columns WHERE table_id = ?", (table_id,))
         conn.execute("DELETE FROM result_tables WHERE id = ?", (table_id,))
 
@@ -301,10 +324,13 @@ def load_model_settings() -> dict:
             except Exception:
                 data = {}
     if not data:
-        return dict(DEFAULT_SETTINGS)
-    merged = {**DEFAULT_SETTINGS, **data}
-    merged["text_model"] = {**DEFAULT_SETTINGS["text_model"], **data.get("text_model", {})}
-    merged["vision_model"] = {**DEFAULT_SETTINGS["vision_model"], **data.get("vision_model", {})}
+        merged = dict(DEFAULT_SETTINGS)
+    else:
+        merged = {**DEFAULT_SETTINGS, **data}
+        merged["text_model"] = {**DEFAULT_SETTINGS["text_model"], **data.get("text_model", {})}
+        merged["vision_model"] = {**DEFAULT_SETTINGS["vision_model"], **data.get("vision_model", {})}
+    if os.environ.get("DATA_ENTRY_FORCE_MOCK", "").strip().lower() in {"1", "true", "yes"}:
+        merged["mock"] = True
     return merged
 
 
@@ -314,3 +340,88 @@ def save_model_settings(settings: dict) -> None:
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('model', ?)",
             (json.dumps(settings, ensure_ascii=False),)
         )
+
+
+# ===== 导入落库 =====
+
+def commit_import(
+    table_id: int,
+    rows: list[dict],
+    *,
+    source_files: list[str] | None = None,
+    skill_name: str = "",
+    conflicts: list[dict] | None = None,
+) -> dict:
+    if not get_table(table_id):
+        raise ValueError("结果表不存在")
+    cleaned = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        data = {k: v for k, v in row.items() if k != "_conflicts"}
+        if any(str(v).strip() for v in data.values() if v is not None):
+            cleaned.append(data)
+    if not cleaned:
+        raise ValueError("没有可导入的数据")
+    now = time.time()
+    with get_db() as conn:
+        cur = conn.execute(
+            "INSERT INTO import_batches (table_id, source_files, skill_name, row_count, conflicts, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                table_id,
+                json.dumps(source_files or [], ensure_ascii=False),
+                skill_name or "",
+                len(cleaned),
+                json.dumps(conflicts or [], ensure_ascii=False),
+                now,
+            ),
+        )
+        batch_id = cur.lastrowid
+        for data in cleaned:
+            conn.execute(
+                "INSERT INTO imported_rows (table_id, batch_id, data, created_at) VALUES (?, ?, ?, ?)",
+                (table_id, batch_id, json.dumps(data, ensure_ascii=False), now),
+            )
+    return {"batch_id": batch_id, "row_count": len(cleaned)}
+
+
+def list_imported_rows(table_id: int) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, batch_id, data, created_at FROM imported_rows "
+            "WHERE table_id = ? ORDER BY id",
+            (table_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["data"] = json.loads(d["data"])
+            except Exception:
+                d["data"] = {}
+            out.append(d)
+        return out
+
+
+def list_import_batches(table_id: int) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, source_files, skill_name, row_count, conflicts, created_at "
+            "FROM import_batches WHERE table_id = ? ORDER BY id DESC",
+            (table_id,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["batch_id"] = d.pop("id")
+            try:
+                d["source_files"] = json.loads(d["source_files"] or "[]")
+            except Exception:
+                d["source_files"] = []
+            try:
+                d["conflicts"] = json.loads(d["conflicts"] or "[]")
+            except Exception:
+                d["conflicts"] = []
+            out.append(d)
+        return out
