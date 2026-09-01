@@ -36,7 +36,9 @@
             </div>
             <div class="card-meta">
               <span class="meta-chip"><i class="ri-layout-column-line"></i> {{ t.column_count }} 列</span>
-              <span class="meta-chip" v-if="t.row_count"><i class="ri-database-2-line"></i> {{ t.row_count }} 行已入库</span>
+              <span class="meta-chip rows" v-if="Number(t.row_count) > 0">
+                <i class="ri-database-2-line"></i> {{ t.row_count }} 行已入库
+              </span>
             </div>
             <div class="card-actions">
               <button class="btn primary" @click="openImport(t)"><i class="ri-sparkling-2-line"></i> AI 导入</button>
@@ -215,6 +217,7 @@ async function deleteTable(t) {
 .card-meta { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
 .meta-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #888; background: #fafafa; border-radius: 4px; padding: 3px 8px; }
 .meta-chip .ri { font-size: 13px; color: #2468DB; }
+.meta-chip.rows { color: #1d5bc4; background: #eef4fd; font-weight: 600; }
 .card-actions { display: flex; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #f5f5f5; }
 .card-actions .btn.primary { flex: 1; justify-content: center; }
 
