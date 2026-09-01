@@ -34,17 +34,30 @@ def merge_extracted_rows(rows: list[dict], *, key_field: str = "cpds_id") -> tup
     conflicts: list[dict] = []
 
     for raw in rows or []:
+        incoming_conflicts = dict((raw or {}).get("_conflicts") or {})
         row = {k: v for k, v in (raw or {}).items() if k != "_conflicts"}
         key = _norm_key(row.get(key_field))
         if not key:
-            merged.append(dict(row))
+            item = dict(row)
+            if incoming_conflicts:
+                item["_conflicts"] = incoming_conflicts
+            merged.append(item)
             continue
         if key not in index:
             index[key] = len(merged)
-            merged.append(dict(row))
+            item = dict(row)
+            if incoming_conflicts:
+                item["_conflicts"] = incoming_conflicts
+            merged.append(item)
             continue
         dest = merged[index[key]]
         dest_conflicts = dict(dest.get("_conflicts") or {})
+        for field, vals in incoming_conflicts.items():
+            seen = dest_conflicts.setdefault(field, [])
+            for v in vals if isinstance(vals, list) else [vals]:
+                sv = str(v).strip()
+                if sv and sv not in seen:
+                    seen.append(sv)
         for field, val in row.items():
             if field == key_field or _blank(val):
                 continue
@@ -86,7 +99,7 @@ def summarize_chunk_notes(chunks: list[tuple[str, list[dict]]]) -> str:
     empty_n = total - len(filled)
     lines = [
         f"共 {total} 段：{len(filled)} 段抽出数据"
-        + (f"，{empty_n} 段为封面/方法等无结果（已忽略，避免和表内数据矛盾）。" if empty_n else "。")
+        + (f"，{empty_n} 段无抽出结果（已忽略，避免和表内数据矛盾）。" if empty_n else "。")
     ]
     if empty_n and filled:
         empty_idx = [str(i) for i, (note, rows) in enumerate(chunks, 1) if not rows]
@@ -101,3 +114,28 @@ def summarize_chunk_notes(chunks: list[tuple[str, list[dict]]]) -> str:
     if not filled:
         lines.append("各段均未抽出结果行。")
     return "\n".join(lines)
+
+
+def compose_extraction_reply(
+    chunk_notes: list[tuple[str, list[dict]]],
+    merged: list[dict],
+    *,
+    raw_n: int,
+    n_items: int,
+    new_conflicts: list[dict],
+) -> str:
+    """多附件时隐藏空文件说明；单附件沿用内层分页摘要。"""
+    if n_items > 1:
+        reply = summarize_chunk_notes(chunk_notes)
+    else:
+        reply = (chunk_notes[0][0] if chunk_notes else "") or ""
+    if not (reply or "").strip():
+        reply = f"合计 {len(merged)} 行。"
+    extras: list[str] = []
+    if len(merged) < raw_n:
+        extras.append(f"已按化合物 ID 合并：{raw_n} 行 → {len(merged)} 行。")
+    if new_conflicts:
+        extras.append(f"有 {len(new_conflicts)} 处取值不一致，已标黄，请核对后再确认导入。")
+    if extras:
+        reply = reply.rstrip() + "\n" + "\n".join(extras)
+    return reply

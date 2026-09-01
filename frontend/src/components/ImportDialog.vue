@@ -63,6 +63,9 @@
                   <span :class="{ 'required-mark': col.required }">{{ col.title }}</span>
                   <span v-if="col.description" class="col-info" :title="col.description"><i class="ri-information-line"></i></span>
                 </template>
+                <template #default="{ row }">
+                  <span :title="conflictTitle(row, col) || undefined">{{ row[col.field] }}</span>
+                </template>
                 <template #edit="{ row }">
                   <template v-if="col.type === 'select'">
                     <select v-model="row[col.field]" class="cell-editor">
@@ -413,6 +416,16 @@ function cellClassName({ row, column }) {
   if (invalidMap.value.has(`${rowIndex}::${column.field}`)) return 'cell-invalid'
   if (row?._conflicts && row._conflicts[column.field]) return 'cell-conflict'
   return ''
+}
+
+function conflictTitle(row, col) {
+  const vals = row?._conflicts?.[col.field]
+  if (!vals) return ''
+  const list = Array.isArray(vals) ? vals.map(v => String(v).trim()).filter(Boolean) : [String(vals)]
+  const kept = String(row[col.field] ?? list[0] ?? '').trim()
+  const others = list.filter(v => v !== kept)
+  if (!others.length) return '分页取值不一致，已保留先出现的值'
+  return `分页冲突：表内保留 ${kept}；其它段还有 ${others.join('、')}`
 }
 
 function currentAnchor() {
@@ -785,6 +798,7 @@ function applyRows(rows, { replace = true } = {}) {
     target._conflicts = row._conflicts && Object.keys(row._conflicts).length ? row._conflicts : undefined
     idx++
   }
+  invalidPaint.value += 1
 }
 
 async function onEditClosed({ row, column } = {}) {

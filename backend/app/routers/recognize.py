@@ -12,7 +12,7 @@ from ..services import file_parser, ai_service
 from ..services.ai_service import friendly_llm_error
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
-from ..services.row_merge import merge_extracted_rows
+from ..services.row_merge import compose_extraction_reply, merge_extracted_rows
 
 router = APIRouter(prefix="/api/recognize", tags=["recognize"])
 
@@ -146,7 +146,7 @@ def _run_chat(req: ChatRequest) -> dict:
         return {"reply": reply, "rows": rows, "intent": intent, "file_meta": file_meta, **_skill_meta_payload(resolved)}
 
     all_rows: list[dict] = []
-    notes: list[str] = []
+    chunk_notes: list[tuple[str, list[dict]]] = []
     resolved_list: list[dict] = []
     resolved = _resolve_for_request(req, items[0]["text"], allow_auto=True)
     n = len(items)
@@ -159,8 +159,12 @@ def _run_chat(req: ChatRequest) -> dict:
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
         )
+        label = item.get("label") or item["file_id"]
         sk = resolved.get("skill_name") or "基线"
-        notes.append(f"附件 {i}/{n}（{item.get('label') or item['file_id']}）：{sk}，抽出 {len(rows or [])} 行")
+        note = f"附件 {i}/{n}（{label}）：{sk}，抽出 {len(rows or [])} 行"
+        if reply:
+            note = f"{note}\n{reply}"
+        chunk_notes.append((note, rows or []))
         all_rows.extend(rows or [])
     names = []
     for r in resolved_list:
@@ -173,13 +177,10 @@ def _run_chat(req: ChatRequest) -> dict:
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     raw_n = len(all_rows)
     all_rows, conflicts = merge_extracted_rows(all_rows, key_field="cpds_id")
-    extra = ""
-    if len(all_rows) < raw_n:
-        extra += f"\n已按化合物 ID 合并：{raw_n} 行 → {len(all_rows)} 行。"
-    if conflicts:
-        extra += f"\n有 {len(conflicts)} 处取值不一致，已标黄，请核对后再确认导入。"
     return {
-        "reply": "逐文件识别后合并：\n" + "\n".join(notes) + f"\n合计 {len(all_rows)} 行。" + extra,
+        "reply": compose_extraction_reply(
+            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+        ),
         "rows": all_rows,
         "intent": intent,
         "file_meta": file_meta,
@@ -261,7 +262,7 @@ async def _aiter_chat_events(req: ChatRequest):
     yield "step", {"text": f"读取 {n} 个附件，将逐个识别后合并", "intent": intent}
 
     all_rows: list = []
-    notes: list[str] = []
+    chunk_notes: list[tuple[str, list[dict]]] = []
     resolved_list: list[dict] = []
     resolved = {
         "skill_id": None, "skill_name": None, "skill_auto": True,
@@ -294,8 +295,10 @@ async def _aiter_chat_events(req: ChatRequest):
                 reply, rows = payload
         n_rows = len(rows or [])
         yield "step", {"text": f"附件 {i}/{n} 抽出 {n_rows} 行"}
+        note = f"附件 {i}/{n}（{label}）"
         if reply:
-            notes.append(f"附件 {i}/{n}（{label}）：{reply}")
+            note = f"{note}：{reply}"
+        chunk_notes.append((note, rows or []))
         all_rows.extend(rows or [])
 
     if not items:
@@ -307,7 +310,7 @@ async def _aiter_chat_events(req: ChatRequest):
             if kind == "ping":
                 yield "ping", {}
             else:
-                notes.append(payload[0])
+                chunk_notes.append((payload[0], payload[1] or []))
                 all_rows.extend(payload[1] or [])
 
     raw_n = len(all_rows)
@@ -322,13 +325,10 @@ async def _aiter_chat_events(req: ChatRequest):
     if n > 1:
         meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
-    extra = ""
-    if len(all_rows) < raw_n:
-        extra += f"\n已按化合物 ID 合并：{raw_n} 行 → {len(all_rows)} 行。"
-    if conflicts:
-        extra += f"\n有 {len(conflicts)} 处取值不一致，已标黄，请核对后再确认导入。"
     yield "done", {
-        "reply": ("\n\n".join(notes) + extra).strip() or f"合计 {len(all_rows)} 行。",
+        "reply": compose_extraction_reply(
+            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+        ),
         "rows": all_rows,
         "intent": intent,
         **meta,

@@ -1,6 +1,6 @@
 import unittest
 
-from app.services.row_merge import merge_extracted_rows, summarize_chunk_notes
+from app.services.row_merge import compose_extraction_reply, merge_extracted_rows, summarize_chunk_notes
 
 
 class MergeExtractedRowsTest(unittest.TestCase):
@@ -46,6 +46,31 @@ class MergeExtractedRowsTest(unittest.TestCase):
         self.assertEqual(conflicts, [])
         self.assertFalse(merged[0].get("_conflicts"))
 
+    def test_preserves_existing_conflicts_when_merged_again(self):
+        rows = [{
+            "cpds_id": "HW1",
+            "iv_1mpk_vss_l_kg": "1.21",
+            "_conflicts": {"iv_1mpk_vss_l_kg": ["1.21", "0.94"]},
+        }]
+        merged, conflicts = merge_extracted_rows(rows, key_field="cpds_id")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["_conflicts"]["iv_1mpk_vss_l_kg"], ["1.21", "0.94"])
+        self.assertEqual(conflicts, [])
+
+    def test_merges_inherited_conflicts_across_files(self):
+        rows = [
+            {
+                "cpds_id": "HW1",
+                "cl": "0.4",
+                "_conflicts": {"cl": ["0.4", "0.5"]},
+            },
+            {"cpds_id": "HW1", "vss": "1.2"},
+        ]
+        merged, _ = merge_extracted_rows(rows, key_field="cpds_id")
+        self.assertEqual(merged[0]["cl"], "0.4")
+        self.assertEqual(merged[0]["vss"], "1.2")
+        self.assertEqual(merged[0]["_conflicts"]["cl"], ["0.4", "0.5"])
+
 
 class SummarizeChunkNotesTest(unittest.TestCase):
     def test_hides_empty_chunk_warnings(self):
@@ -60,3 +85,32 @@ class SummarizeChunkNotesTest(unittest.TestCase):
         self.assertIn("HW350003A", text)
         self.assertNotIn("没有 Assay Summary", text)
         self.assertNotIn("Protocol 页无结论", text)
+
+
+class ComposeExtractionReplyTest(unittest.TestCase):
+    def test_multi_file_hides_empty_attachment_notes(self):
+        notes = [
+            ("附件 1/3：封面找不到主源", []),
+            ("附件 2/3：抽出 HW1", [{"cpds_id": "HW1"}]),
+            ("附件 3/3：方法页无结果", []),
+        ]
+        merged = [{"cpds_id": "HW1"}]
+        text = compose_extraction_reply(
+            notes, merged, raw_n=2, n_items=3, new_conflicts=[],
+        )
+        self.assertIn("抽出 HW1", text)
+        self.assertNotIn("找不到主源", text)
+        self.assertNotIn("方法页无结果", text)
+        self.assertIn("2 行 → 1 行", text)
+
+    def test_single_file_keeps_inner_pagination_summary(self):
+        inner = "共 3 段：1 段抽出数据，2 段无抽出结果（已忽略，避免和表内数据矛盾）。"
+        text = compose_extraction_reply(
+            [(inner, [{"cpds_id": "HW1"}])],
+            [{"cpds_id": "HW1"}],
+            raw_n=1,
+            n_items=1,
+            new_conflicts=[],
+        )
+        self.assertEqual(text, inner)
+
