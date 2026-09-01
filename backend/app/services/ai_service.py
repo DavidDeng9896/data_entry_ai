@@ -322,22 +322,27 @@ def _build_system_prompt(
 
 
 def _extract_json_array(text: str) -> list[dict]:
-    """从模型输出中提取 JSON 数组，容忍 ```json 包裹和前后杂文本"""
-    text = strip_model_noise(text)
+    parsed = _try_json_array(text)
+    return parsed if parsed is not None else []
+
+
+def _try_json_array(text: str) -> list[dict] | None:
+    """解析 JSON 数组；失败返回 None，以便与合法的空数组 [] 区分。"""
+    text = strip_model_noise(text or "")
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
     start = text.find("[")
     end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
+    if start == -1 or end == -1 or end <= start:
+        return None
     try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return [dict(item) for item in data if isinstance(item, dict)]
+        data = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        pass
-    return []
+        return None
+    if not isinstance(data, list):
+        return None
+    return [dict(item) for item in data if isinstance(item, dict)]
 
 
 def _mock_rows(columns: list[ColumnDef]) -> list[dict]:
@@ -656,14 +661,23 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:
     """把模型回复拆成：对话文本 + <<<ROWS>>> 后的 JSON 行数据。
-    MiniMax 思考块里常复述 <<<ROWS>>> 示例，必须先去噪再用最后一次标记。"""
+    MiniMax 常在思考里复述标记，又在 JSON 后再写一次 <<<ROWS>>>，
+    因此从后往前找第一段能解析的数组。"""
     raw = strip_model_noise(raw)
-    if "<<<ROWS>>>" in raw:
-        text, _, rows_part = raw.rpartition("<<<ROWS>>>")
-        rows = _extract_json_array(rows_part)
-        return text.strip(), rows
-    rows = _extract_json_array(raw)
-    return raw.strip(), rows
+    if "<<<ROWS>>>" not in raw:
+        rows = _extract_json_array(raw)
+        return raw.strip(), rows
+    pieces = raw.split("<<<ROWS>>>")
+    text = pieces[0].strip()
+    rows: list[dict] | None = None
+    for piece in reversed(pieces[1:]):
+        parsed = _try_json_array(piece)
+        if parsed is not None:
+            rows = parsed
+            break
+    if rows is None:
+        rows = _extract_json_array(raw)
+    return text, rows
 
 
 def recognize_image(file_id: str, columns: list[ColumnDef], skill_content: str | None) -> tuple[list[dict], str]:

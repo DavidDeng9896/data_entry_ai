@@ -67,6 +67,7 @@ class MiniMaxThinkParseTest(unittest.TestCase):
             "1. 已定位 Assay Summary\n"
             "<<<ROWS>>>\n"
             "[{\"cpds_id\": \"HW350003A\", \"ic50_um\": \"\"}]\n"
+            "<<<ROWS>>>\n"
         )
         note, rows = _split_chat_reply(raw, cols)
         self.assertEqual(len(rows), 1)
