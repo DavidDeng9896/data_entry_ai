@@ -62,6 +62,11 @@ def compact_file_for_qa(content: str, file_meta: dict | None, limit: int = _QA_F
 def friendly_llm_error(exc: BaseException) -> str:
     raw = str(exc) or type(exc).__name__
     low = raw.lower()
+    if "429" in raw or "rate_limit" in low or "用量上限" in raw:
+        return (
+            "模型配额不足（429）。当前 Token Plan 已用尽或触发限流。"
+            "请在 MiniMax 控制台充值/升级后再识别；设置里也可临时打开 Mock 跑通交互。"
+        )
     if "504" in raw or "502" in raw or "timeout" in low or "timed out" in low or "gateway" in low:
         return (
             "模型网关超时（504）。附件较大或服务繁忙时会出现。"
@@ -318,7 +323,7 @@ def _build_system_prompt(
 
 def _extract_json_array(text: str) -> list[dict]:
     """从模型输出中提取 JSON 数组，容忍 ```json 包裹和前后杂文本"""
-    text = text.strip()
+    text = strip_model_noise(text)
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
@@ -439,13 +444,35 @@ def _client(cfg: dict) -> OpenAI:
     return OpenAI(
         base_url=cfg["base_url"],
         api_key=cfg["api_key"] or "sk-empty",
-        timeout=45.0,
+        timeout=120.0,
         max_retries=0,
     )
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def strip_model_noise(text: str) -> str:
+    """去掉 MiniMax 等模型写进 content 的思考块，避免污染 <<<ROWS>>> / JSON 抽取。"""
+    text = text or ""
+    text = _THINK_BLOCK.sub("", text)
+    text = re.sub(r"<think>.*", "", text, flags=re.S | re.I)
+    return text.strip()
+
+
+def _delta_text(delta) -> str:
+    if not delta:
+        return ""
+    parts: list[str] = []
+    if getattr(delta, "content", None):
+        parts.append(delta.content)
+    return "".join(parts)
+
+
 def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: float = 0) -> str:
     last: BaseException | None = None
+    # MiniMax-M2.x 思考关不掉；reasoning_split 把思考放到 reasoning_content，避免污染 content。
+    extra_body = {"reasoning_split": True}
     for attempt in range(3):
         try:
             stream = True if attempt == 0 else False
@@ -454,21 +481,25 @@ def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: 
                 messages=messages,
                 temperature=temperature,
                 stream=stream,
+                extra_body=extra_body,
             )
             if stream:
                 parts: list[str] = []
                 for ev in resp:
                     if not ev.choices:
                         continue
-                    delta = ev.choices[0].delta
-                    if delta and delta.content:
-                        parts.append(delta.content)
-                return "".join(parts)
-            return resp.choices[0].message.content or ""
+                    parts.append(_delta_text(ev.choices[0].delta))
+                return strip_model_noise("".join(parts))
+            msg = resp.choices[0].message
+            return strip_model_noise(msg.content or "")
         except Exception as e:
             last = e
             msg = str(e).lower()
             stream_unsupported = "stream" in msg and ("not" in msg or "unsupport" in msg or "invalid" in msg)
+            extra_unsupported = "reasoning_split" in msg or "extra_body" in msg or "unexpected" in msg
+            if extra_unsupported and extra_body:
+                extra_body = {}
+                continue
             if stream_unsupported and attempt == 0:
                 continue
             if not _retryable_llm_error(e) or attempt >= 2:
@@ -584,7 +615,8 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                     piece_msgs = list(msgs) + [{
                         "role": "user",
                         "content": (
-                            f"[完整解析后的第 {i}/{total} 页，不是截断丢弃]\n"
+                            f"[这是完整解析的第 {i}/{total} 段，按 Sheet 分页，不是截断丢弃。"
+                            f"其他段可能含封面/方法/结论；本段找不到主源就输出空数组，不要把本段当成整份报告。]\n"
                             f"{chunk}"
                         ),
                     }]
@@ -612,12 +644,15 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
 
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:
-    """把模型回复拆成：对话文本 + <<<ROWS>>> 后的 JSON 行数据"""
+    """把模型回复拆成：对话文本 + <<<ROWS>>> 后的 JSON 行数据。
+    MiniMax 思考块里常复述 <<<ROWS>>> 示例，必须先去噪再用最后一次标记。"""
+    raw = strip_model_noise(raw)
     if "<<<ROWS>>>" in raw:
-        text, _, rows_part = raw.partition("<<<ROWS>>>")
+        text, _, rows_part = raw.rpartition("<<<ROWS>>>")
         rows = _extract_json_array(rows_part)
         return text.strip(), rows
-    return raw.strip(), []
+    rows = _extract_json_array(raw)
+    return raw.strip(), rows
 
 
 def recognize_image(file_id: str, columns: list[ColumnDef], skill_content: str | None) -> tuple[list[dict], str]:
