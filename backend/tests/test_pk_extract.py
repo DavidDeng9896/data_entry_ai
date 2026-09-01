@@ -4,6 +4,7 @@ from pathlib import Path
 from app.schemas import ColumnDef
 from app.services import file_parser
 from app.services.ai_service import _is_pk_target
+from app.services.pk_extract import focus_content_for_model, mock_extract_pk
 
 COLS = [
     ColumnDef(field="cpds_id", title="ID"),
