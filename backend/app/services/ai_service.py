@@ -573,6 +573,14 @@ def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file
     return reply, []
 
 
+def _is_pk_target(table_name: str, columns: list[ColumnDef]) -> bool:
+    name = (table_name or "").lower()
+    if "pk" in name:
+        return True
+    fields = " ".join((c.field or "").lower() for c in (columns or []))
+    return any(k in fields for k in ("auc", "cmax", "vss", "pct_f", "iv_1mpk", "po_"))
+
+
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
          file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
          table_name: str = "") -> tuple[str, list[dict]]:
@@ -586,11 +594,14 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         msgs.append({"role": m.role, "content": m.content})
 
     if file_content and intent != "chat":
-        focused = focus_content_for_model(file_content)
-        if focused:
-            file_content = focused
-            if file_meta is not None:
-                file_meta = {**file_meta, "chars": len(focused)}
+        # PK 报告原始数据页极大，只送封面/参数页避免 504。
+        # 其它 CRO 报告若也裁成「封面」，会把 Assay Summary 等主源丢掉。
+        if _is_pk_target(table_name, columns):
+            focused = focus_content_for_model(file_content)
+            if focused:
+                file_content = focused
+                if file_meta is not None:
+                    file_meta = {**file_meta, "chars": len(focused)}
 
     if file_content:
         if intent == "chat":
