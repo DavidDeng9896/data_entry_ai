@@ -46,6 +46,24 @@ class MergeExtractedRowsTest(unittest.TestCase):
         self.assertEqual(conflicts, [])
         self.assertFalse(merged[0].get("_conflicts"))
 
+    def test_rounded_means_are_not_conflicts(self):
+        rows = [
+            {"cpds_id": "HW1", "t12": "2.02", "tmax": "1.33"},
+            {"cpds_id": "HW1", "t12": "2.02490873", "tmax": "1.33333333"},
+        ]
+        merged, conflicts = merge_extracted_rows(rows, key_field="cpds_id")
+        self.assertEqual(conflicts, [])
+        self.assertFalse(merged[0].get("_conflicts"))
+
+    def test_percent_f_gap_is_still_a_conflict(self):
+        rows = [
+            {"cpds_id": "HW1", "po_5_mpk_pct_f": "98.9"},
+            {"cpds_id": "HW1", "po_5_mpk_pct_f": "97.4497814045999"},
+        ]
+        merged, conflicts = merge_extracted_rows(rows, key_field="cpds_id")
+        self.assertEqual(merged[0]["po_5_mpk_pct_f"], "98.9")
+        self.assertTrue(conflicts)
+
     def test_preserves_existing_conflicts_when_merged_again(self):
         rows = [{
             "cpds_id": "HW1",

@@ -24,7 +24,7 @@ def _values_equal(a, b) -> bool:
     if math.isnan(fa) or math.isnan(fb):
         return False
     scale = max(abs(fa), abs(fb), 1e-9)
-    return abs(fa - fb) / scale < 1e-3
+    return abs(fa - fb) / scale < 1e-2
 
 
 def merge_extracted_rows(rows: list[dict], *, key_field: str = "cpds_id") -> tuple[list[dict], list[dict]]:
