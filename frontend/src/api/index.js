@@ -91,6 +91,7 @@ export const api = {
           continue
         }
         if (event === 'step' && extra.onStep) extra.onStep(json)
+        if (event === 'ping' && extra.onPing) extra.onPing(json)
         if (event === 'error') throw new Error(json.message || '对话失败')
         if (event === 'done') donePayload = json
       }

@@ -55,6 +55,8 @@ class MultiFileChatTest(unittest.TestCase):
             self.assertEqual(res.status_code, 200)
             body = "".join(res.iter_text())
         self.assertNotIn("504", body)
+        self.assertIn("正在解析附件 1/4", body)
+        self.assertIn("正在匹配 Skill", body)
         self.assertIn("附件 1/4", body)
         self.assertIn("附件 4/4", body)
         self.assertIn("event: done", body)

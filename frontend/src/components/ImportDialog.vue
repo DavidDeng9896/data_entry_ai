@@ -136,7 +136,13 @@
                   :class="{ done: s.done, current: !s.done && si === m.steps.length - 1 }"
                 >
                   <i :class="s.done ? 'ri-checkbox-circle-fill' : 'ri-loader-4-line spin'"></i>
-                  <span>{{ s.text }}</span>
+                  <span>{{ s.text }}<span v-if="!s.done && s.waitHint" class="step-wait"> · {{ s.waitHint }}</span></span>
+                </li>
+              </ul>
+              <ul v-else-if="m.streaming" class="progress-steps">
+                <li class="current">
+                  <i class="ri-loader-4-line spin"></i>
+                  <span>正在连接服务…</span>
                 </li>
               </ul>
               <template v-else-if="m.fileChip">
@@ -350,6 +356,7 @@ const canSubmit = computed(() => {
 const canSteer = computed(() => !!(hasDraft.value || hasReadyFiles.value || chatQueue.value.length))
 const thinkingLabel = computed(() => (streamIntent.value === 'chat' ? '思考中' : '识别中'))
 const composerPlaceholder = computed(() => {
+  if (isUploadingFiles.value) return '正在上传附件…'
   if (chatThinking.value) {
     return streamIntent.value === 'chat'
       ? '思考中… Enter 排队'
@@ -585,16 +592,33 @@ async function onFileChange(e) {
   const files = Array.from(e.target.files || [])
   if (!files.length) return
   if (fileInput.value) fileInput.value.value = ''
-  for (const f of files) {
+  chatSessionStarted.value = true
+  const uploadTurn = {
+    role: 'assistant',
+    content: '',
+    steps: files.map(f => ({ text: `准备上传 ${f.name}`, done: false })),
+    streaming: true,
+    localOnly: true
+  }
+  chatLog.value.push(uploadTurn)
+  scrollChat()
+  let ok = 0
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i]
     const localId = `${Date.now()}-${Math.random()}`
     const item = { localId, name: f.name, fileId: null, uploading: true, error: null }
     chatAttachments.value.push(item)
+    uploadTurn.steps[i].text = `正在上传 ${f.name}`
+    scrollChat()
     try {
       const up = await api.upload(f)
       const idx = chatAttachments.value.findIndex(a => a.localId === localId)
       if (idx >= 0) {
         chatAttachments.value[idx] = { ...chatAttachments.value[idx], fileId: up.file_id, uploading: false }
       }
+      uploadTurn.steps[i].done = true
+      uploadTurn.steps[i].text = `已上传 ${f.name}`
+      ok += 1
     } catch (err) {
       const idx = chatAttachments.value.findIndex(a => a.localId === localId)
       if (idx >= 0) {
@@ -604,8 +628,15 @@ async function onFileChange(e) {
           error: err.message || '上传失败'
         }
       }
+      uploadTurn.steps[i].done = true
+      uploadTurn.steps[i].text = `上传失败 ${f.name}：${err.message || '未知错误'}`
     }
+    scrollChat()
   }
+  uploadTurn.streaming = false
+  uploadTurn.content = ok
+    ? `已上传 ${ok} 个附件，可补充要求后发送，或直接发送开始识别。`
+    : '附件上传失败，请重试。'
 }
 
 function pushAttachmentBubbleIfNeeded() {
@@ -707,13 +738,18 @@ async function runTurn() {
   streamIntent.value = 'recognize'
   startClock()
   scrollChat()
-  const assistant = { role: 'assistant', content: '', steps: [], streaming: true }
+  const assistant = {
+    role: 'assistant',
+    content: '',
+    steps: [{ text: '已发送，正在连接服务…', done: false }],
+    streaming: true
+  }
   chatLog.value.push(assistant)
   scrollChat()
   try {
     const res = await api.chatStream({
       messages: chatLog.value
-        .filter(m => !m.fileChip && !m.pending && !m.streaming && m.content)
+        .filter(m => !m.fileChip && !m.localOnly && !m.pending && !m.streaming && m.content)
         .map(m => ({ role: m.role, content: m.content })),
       columns: columns.value,
       ...skillPayload(),
@@ -727,6 +763,16 @@ async function runTurn() {
         const prev = assistant.steps[assistant.steps.length - 1]
         if (prev) prev.done = true
         assistant.steps.push({ text: step.text, done: false })
+        scrollChat()
+      },
+      onPing: (ping) => {
+        if (myTurn !== turnSeq) return
+        const last = assistant.steps[assistant.steps.length - 1]
+        if (!last || last.done) return
+        last.pings = (last.pings || 0) + 1
+        if (last.pings < 2) return
+        const elapsed = ping?.elapsed ?? Math.floor((Date.now() - runStartedAt.value) / 1000)
+        last.waitHint = `已等待 ${elapsed}s`
         scrollChat()
       }
     })
@@ -991,6 +1037,7 @@ async function confirmImport() {
 .progress-steps li.current .ri { color: #2468DB; }
 .progress-steps li.done { color: #389e0d; }
 .progress-steps li.done .ri { color: #52c41a; }
+.step-wait { color: #8a8f98; font-size: 12px; }
 
 .queue-dock {
   border-top: 1px solid #eef0f2; background: #fff; flex-shrink: 0;
