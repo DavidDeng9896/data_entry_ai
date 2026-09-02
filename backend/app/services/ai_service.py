@@ -282,7 +282,7 @@ _OUTPUT_RECOGNIZE = """## 本次输出协议（一次性识别）
 _OUTPUT_CHAT = """## 本次输出协议（多轮对话）
 
 1. 用户在对话中提出的额外要求或规则（单位换算、列映射、过滤、默认值等）必须记住并遵循；与 Skill 冲突时以更新、更具体的对话约定为准，但仍不得编造数据、不得扩列。
-2. 当本轮是 **识别**（抽取填表）时：先写 3–5 条短步骤（例如：已加载 Skill / 解析附件 / 定位主源 / 映射列 / 完成行数），然后单独一行输出：
+2. 当本轮是 **识别**（抽取填表）时：用一两句说明抽到了什么（不要写「映射 N 列 / 已加载 Skill」这类过程清单，界面会自己显示进度），然后单独一行输出：
 <<<ROWS>>>
 [JSON 数组，每个元素一行数据，key 用字段名，value 用字符串]
 3. 当本轮是 **问答**（解释、确认、补充规则但未要求再识别）时：正常回答即可，不要输出 <<<ROWS>>>，不要抽数覆盖表格。
@@ -495,7 +495,24 @@ def _delta_text(delta) -> str:
     return "".join(parts)
 
 
-def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: float = 0) -> str:
+def report_stream_progress(buf: str, seen: set, on_progress) -> None:
+    """把模型流式输出转成界面进度，避免停在「映射 N 列」这种过程句上。"""
+    if not on_progress:
+        return
+    compact = buf.replace(" ", "")
+    if "<<<ROWS>>>" in buf or re.search(r"\n\s*\[", buf) or buf.lstrip().startswith("["):
+        if "gen_rows" not in seen:
+            seen.add("gen_rows")
+            on_progress("正在生成结果…")
+        return
+    if re.search(r"映射\s*\d*\s*列", buf) or "映射列" in compact:
+        if "mapping" not in seen:
+            seen.add("mapping")
+            on_progress("正在抽取并生成结果…")
+
+
+def _complete(client: OpenAI, model: str, messages: list[dict], *,
+              temperature: float = 0, on_progress=None) -> str:
     last: BaseException | None = None
     extra_body = extra_body_for_model(model)
     for attempt in range(3):
@@ -513,10 +530,17 @@ def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: 
             )
             if stream:
                 parts: list[str] = []
+                seen: set = set()
+                last_len = 0
                 for ev in resp:
                     if not ev.choices:
                         continue
                     parts.append(_delta_text(ev.choices[0].delta))
+                    buf = "".join(parts)
+                    report_stream_progress(buf, seen, on_progress)
+                    if on_progress and "gen_rows" in seen and len(buf) - last_len >= 1200:
+                        last_len = len(buf)
+                        on_progress(f"正在生成结果…（{len(buf)} 字）")
                 return strip_model_noise("".join(parts))
             msg = resp.choices[0].message
             return strip_model_noise(msg.content or "")
@@ -660,7 +684,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                             f"{chunk}"
                         ),
                     }]
-                    raw = _complete(client, cfg["model"], piece_msgs)
+                    raw = _complete(client, cfg["model"], piece_msgs, on_progress=on_progress)
                     note, rows = _split_chat_reply(raw, columns)
                     chunk_results.append((note, rows or []))
                 raw_rows = [r for _, rs in chunk_results for r in rs]
@@ -684,7 +708,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     client = _client(cfg)
     if on_progress:
         on_progress("正在调用模型识别…")
-    raw = _complete(client, cfg["model"], msgs)
+    raw = _complete(client, cfg["model"], msgs, on_progress=on_progress)
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []
