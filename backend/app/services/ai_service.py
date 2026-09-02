@@ -15,7 +15,7 @@ from .pk_extract import focus_content_for_model, mock_extract_pk
 from .row_merge import merge_extracted_rows, summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
-_LLM_CHUNK_CHARS = 24000
+_LLM_CHUNK_CHARS = 32000
 _QA_FILE_CHARS = 12000
 
 
@@ -137,6 +137,7 @@ _BASELINE_PROMPT = """# 导入识别基线
 1. **不编造**：源中没有的值填 `""`；不得用「通常会是」「按经验」补数。
 2. **不扩列**：只能使用目标表已声明的 `field`；不得发明字段、不得改名。
 3. **类型保守**：数字列尽量只输出可解析数值字符串；select 尽量落在候选值内；无法安全转换时留空。
+   源表数字按单元格**显示写法**抄录（含小数位），不要把 `774.076` 还原成 `774.076333333`。
 4. **输出干净**：按系统要求的 JSON / 分隔符协议输出；不要把长篇推理写进 JSON。
 
 其余都是 **软偏好**：可被页面证据或 Skill 覆盖。
@@ -239,6 +240,7 @@ _BASELINE_PROMPT = """# 导入识别基线
 
 - 明确无意义的占位（NA、/、-、空）→ `""`；
 - 带比较符或无穷 → `""`（或按 Skill 规范化）；
+- 数字按源表显示位数原样抄，不要补隐藏的浮点尾巴；
 - 数字前后粘着单位 → 尽量剥离单位只留数字；剥离不开 → `""`；
 - 一格多行复测 / 多组数值：优先 Mean/Average/Avg/平均值/均值；有 Skill 跟 Skill；否则仅同指标同单位同条件才算术平均；对不上留空，不要随便取第一个。
 
@@ -648,7 +650,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     if file_content and intent != "chat":
         # PK 报告原始数据页极大，只送封面/参数页避免 504。
         # 其它 CRO 报告若也裁成「封面」，会把 Assay Summary 等主源丢掉。
-        if _is_pk_target(table_name, columns):
+        if _is_pk_target(table_name, columns) and not settings.get("mock"):
             focused = focus_content_for_model(file_content)
             if focused:
                 file_content = focused

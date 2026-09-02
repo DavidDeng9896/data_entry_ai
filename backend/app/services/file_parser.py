@@ -3,8 +3,9 @@
 - PDF：pdfplumber 提取文本和表格
 - 图片：返回 bytes，走视觉模型
 """
-import io
+import re
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -78,14 +79,162 @@ def parse_to_text(file_id: str, max_chars: int = 0) -> str:
     return text
 
 
+_FMT_DATE = re.compile(r"[yY]{2,}|[mM]{2,}|[dD]{2,}")
+_FMT_SCI = re.compile(r"[eE][+\-0]")
+
+
+def excel_decimal_places(number_format: str) -> int | None:
+    """从 Excel 数字格式读出小数位。General / 无法识别则返回 None。"""
+    fmt = (number_format or "General").split(";")[0]
+    fmt = fmt.replace("\\", "").replace("_", "").replace("*", "").replace("?", "")
+    fmt = re.sub(r'"[^"]*"', "", fmt)
+    if "General" in fmt or fmt.strip() in {"@", ""}:
+        return None
+    if _FMT_SCI.search(fmt):
+        head = fmt.split("e")[0].split("E")[0]
+        if "." in head:
+            return sum(1 for ch in head.split(".", 1)[1] if ch in "0#")
+        return 0
+    if "." in fmt:
+        dec = fmt.split(".", 1)[1]
+        dec = dec.split("%")[0]
+        n = sum(1 for ch in dec if ch in "0#")
+        return n
+    if "0" in fmt or "#" in fmt:
+        return 0
+    return None
+
+
+def format_excel_number(value: float, number_format: str = "General") -> str:
+    """按单元格显示格式输出数字，而不是 IEEE 原始精度。"""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    fmt = number_format or "General"
+    if _FMT_DATE.search(fmt) and "E+" not in fmt.upper() and "%" not in fmt:
+        try:
+            from openpyxl.utils.datetime import from_excel
+            dt = from_excel(value)
+            if isinstance(dt, datetime):
+                return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    places = excel_decimal_places(fmt)
+    num = float(value)
+    if _FMT_SCI.search(fmt) and "%" not in fmt:
+        prec = 2 if places is None else places
+        return f"{num:.{prec}E}"
+    if "%" in fmt:
+        num *= 100
+        if places is None:
+            places = 0
+        return f"{num:.{places}f}%"
+    if places is None:
+        if isinstance(value, int) or (isinstance(value, float) and num.is_integer() and abs(num) < 1e15):
+            return str(int(num))
+        text = f"{num:.11g}"
+        if "e" in text.lower():
+            return text
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+    rounded = f"{num:.{places}f}"
+    return rounded
+
+
+def excel_display_value(value, number_format: str = "General") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S").replace(" 00:00:00", "")
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (int, float)):
+        return format_excel_number(value, number_format)
+    return str(value).strip()
+
+
 def _df_to_markdown(df: pd.DataFrame) -> str:
     """DataFrame 转 markdown 表格，列名不清时保留原始内容"""
+    df = df.replace("", pd.NA)
     df = df.dropna(how="all").dropna(axis=1, how="all")
     if df.empty:
         return ""
     df = df.fillna("")
     df.columns = [str(c) if str(c) and not str(c).startswith("Unnamed") else f"col{i}" for i, c in enumerate(df.columns)]
     return df.to_markdown(index=False)
+
+
+def _read_xlsx_displayed(path: Path) -> dict:
+    from openpyxl import load_workbook
+
+    wb = load_workbook(filename=str(path), data_only=True)
+    try:
+        out = {}
+        for ws in wb.worksheets:
+            rows = []
+            for row in ws.iter_rows():
+                rows.append([excel_display_value(c.value, c.number_format) for c in row])
+            if rows and any(any(x for x in r) for r in rows):
+                out[ws.title] = pd.DataFrame(rows)
+        if not out:
+            raise ValueError("openpyxl displayed: empty")
+        return out
+    finally:
+        wb.close()
+
+
+def _read_xls_displayed(path: Path) -> dict:
+    import xlrd
+
+    try:
+        book = xlrd.open_workbook(str(path), formatting_info=True)
+    except Exception:
+        book = xlrd.open_workbook(str(path), formatting_info=False)
+    fmt_map = getattr(book, "format_map", {})
+    xf_list = getattr(book, "xf_list", [])
+
+    def cell_fmt(cell) -> str:
+        try:
+            xf = xf_list[cell.xf_index]
+            rec = fmt_map.get(xf.format_key)
+            return getattr(rec, "format_str", None) or "General"
+        except Exception:
+            return "General"
+
+    out = {}
+    for sheet in book.sheets():
+        rows = []
+        for r in range(sheet.nrows):
+            line = []
+            for c in range(sheet.ncols):
+                cell = sheet.cell(r, c)
+                val = cell.value
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        tup = xlrd.xldate_as_tuple(val, book.datemode)
+                        val = datetime(*tup[:6]) if any(tup[3:]) else date(*tup[:3])
+                    except Exception:
+                        pass
+                elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                    val = bool(val)
+                elif cell.ctype == xlrd.XL_CELL_EMPTY:
+                    val = None
+                line.append(excel_display_value(val, cell_fmt(cell)))
+            rows.append(line)
+        if rows and any(any(x for x in r) for r in rows):
+            out[sheet.name] = pd.DataFrame(rows)
+    if not out:
+        raise ValueError("xlrd displayed: empty")
+    return out
+
+
+def _read_excel_displayed(path: Path) -> dict:
+    ext = path.suffix.lower()
+    if ext == ".xls":
+        return _read_xls_displayed(path)
+    return _read_xlsx_displayed(path)
 
 
 def _read_excel_sheets(path: Path) -> dict:
@@ -126,7 +275,10 @@ def _parse_excel(path: Path) -> str:
         df = pd.read_csv(path, sep=sep, engine="python", dtype=str, header=None)
         parts.append(_df_to_markdown(df))
     else:
-        sheets = _read_excel_sheets(path)
+        try:
+            sheets = _read_excel_displayed(path)
+        except Exception:
+            sheets = _read_excel_sheets(path)
         for name, df in sheets.items():
             md = _df_to_markdown(df)
             if md:

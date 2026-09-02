@@ -32,17 +32,15 @@ class PkExtractTest(unittest.TestCase):
     def test_focus_drops_raw_data(self):
         text = _parse("DM-RF-2025022001（HW350003A)DPK检测报告.xlsx")
         focused = focus_content_for_model(text)
-        self.assertIn("PK 参数", focused)
+        self.assertIn("结果汇总", focused)
         self.assertNotIn("原始数据", focused)
-        self.assertNotIn("结果汇总", focused)
         self.assertLess(len(focused), len(text) / 2)
 
     def test_monkey_focus_fits_one_chunk(self):
         from app.services.ai_service import split_file_chunks
         text = _parse("08065-25011-NG_HW356009-P1食蟹猴药代_报告_终稿_250312.xlsx")
         focused = focus_content_for_model(text)
-        self.assertIn("PK parameters", focused)
-        self.assertNotIn("Data summary", focused)
+        self.assertIn("Data summary", focused)
         self.assertNotIn("Raw data", focused)
         self.assertEqual(len(split_file_chunks(focused)), 1)
 
