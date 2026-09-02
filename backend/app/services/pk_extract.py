@@ -8,7 +8,8 @@ from ..schemas import ColumnDef
 
 _FOCUS_COVER = re.compile(r"cover|封面", re.I)
 _FOCUS_SUMMARY = re.compile(r"data summary|结果汇总", re.I)
-_FOCUS_PARAMS = re.compile(r"pk 参数|pk parameters|试验设计|study design", re.I)
+_FOCUS_PK_TABLE = re.compile(r"pk\s*参数|pk\s*parameters", re.I)
+_FOCUS_DESIGN = re.compile(r"试验设计|study design", re.I)
 _SKIP = re.compile(r"raw data|原始数据|lc-ms|标曲|formulation|clinical observation", re.I)
 _HW = re.compile(r"HW[\w\-]+", re.I)
 _SKIP_ROW = re.compile(
@@ -18,13 +19,14 @@ _SKIP_ROW = re.compile(
 
 
 def focus_content_for_model(content: str) -> str:
-    """优先封面 + 结果汇总（带 Excel 显示格式）。没有汇总页再退回 PK 参数/试验设计。"""
+    """封面 + 结果汇总 + PK 参数表（有无空格都认）。没有这些再退回试验设计。跳过原始数据。"""
     parts = [p for p in re.split(r"(?=^### )", content or "", flags=re.M) if p.strip()]
     if not parts:
         return content or ""
     cover: list[str] = []
     summary: list[str] = []
-    params: list[str] = []
+    pk_table: list[str] = []
+    design: list[str] = []
     for p in parts:
         head = p.splitlines()[0]
         if _SKIP.search(head):
@@ -33,9 +35,13 @@ def focus_content_for_model(content: str) -> str:
             cover.append(p)
         elif _FOCUS_SUMMARY.search(head):
             summary.append(p)
-        elif _FOCUS_PARAMS.search(head):
-            params.append(p)
-    kept = (cover + summary) if summary else (cover + params)
+        elif _FOCUS_PK_TABLE.search(head):
+            pk_table.append(p)
+        elif _FOCUS_DESIGN.search(head):
+            design.append(p)
+    kept = cover + summary + pk_table
+    if not summary and not pk_table:
+        kept += design
     if kept:
         return "\n".join(kept)
     return content or ""

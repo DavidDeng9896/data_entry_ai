@@ -20,10 +20,20 @@ COLS = [
 ]
 
 FOLDER = Path("/workspace/doc/EO035/EO035药理测试原始数据/犬和猴PK数据")
+RAT_FOLDER = Path("/workspace/doc/EO035/EO035药理测试原始数据/大鼠PK数据")
 
 
-def _parse(name: str) -> str:
-    p = FOLDER / name
+def _parse(name: str, folder: Path = FOLDER) -> str:
+    p = folder / name
+    info = file_parser.save_upload(p.name, p.read_bytes())
+    return file_parser.parse_to_text(info["file_id"], max_chars=0)
+
+
+def _parse_glob(folder: Path, pattern: str) -> str:
+    matches = list(folder.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(pattern)
+    p = matches[0]
     info = file_parser.save_upload(p.name, p.read_bytes())
     return file_parser.parse_to_text(info["file_id"], max_chars=0)
 
@@ -36,11 +46,44 @@ class PkExtractTest(unittest.TestCase):
         self.assertNotIn("原始数据", focused)
         self.assertLess(len(focused), len(text) / 2)
 
+    def test_rat_keeps_pk_param_sheet_without_space(self):
+        """普瑞昇大鼠报告：有结果汇总时仍要送 PK参数 页（无空格），不能只留封面。"""
+        text = _parse_glob(RAT_FOLDER, "*2025020702*")
+        self.assertIn("### Sheet: PK参数", text)
+        self.assertIn("### Sheet: 结果汇总", text)
+        focused = focus_content_for_model(text)
+        self.assertIn("### Sheet: PK参数", focused)
+        self.assertIn("### Sheet: 结果汇总", focused)
+        self.assertIn("Cl_obs", focused)
+        self.assertNotIn("### Sheet: 原始数据", focused)
+        self.assertNotIn("### Sheet: 试验设计", focused)
+
+    def test_focus_synthetic_pk_param_no_space_with_summary(self):
+        text = "\n".join([
+            "### Sheet: 封面",
+            "普瑞昇",
+            "### Sheet: 结果汇总",
+            "表5 Mean CL",
+            "### Sheet: PK参数",
+            "Cl_obs 0.70",
+            "### Sheet: 原始数据",
+            "peak area",
+            "### Sheet: 试验设计",
+            "SD 大鼠",
+        ])
+        focused = focus_content_for_model(text)
+        self.assertIn("PK参数", focused)
+        self.assertIn("Cl_obs", focused)
+        self.assertIn("结果汇总", focused)
+        self.assertNotIn("原始数据", focused)
+        self.assertNotIn("试验设计", focused)
+
     def test_monkey_focus_fits_one_chunk(self):
         from app.services.ai_service import split_file_chunks
         text = _parse("08065-25011-NG_HW356009-P1食蟹猴药代_报告_终稿_250312.xlsx")
         focused = focus_content_for_model(text)
         self.assertIn("Data summary", focused)
+        self.assertIn("PK parameters", focused)
         self.assertNotIn("Raw data", focused)
         self.assertEqual(len(split_file_chunks(focused)), 1)
 
