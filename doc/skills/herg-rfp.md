@@ -12,6 +12,11 @@
 
 `hERG`
 
+## 读取范围
+
+- 读取：`封面`、`Assay Summary`
+- 跳过：`Protocol`
+
 ## 主源
 
 - **主源**：`Assay Summary` 中 `Compound ID | IC50` 小结

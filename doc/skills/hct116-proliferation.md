@@ -13,6 +13,11 @@ HCT116 细胞增殖抑制检测报告（多化合物 Summary）。
 
 > 注：当前目标表列偏「宽指标」（%inhibition @ top / @10μM / IC50）。本版式 Summary 通常直接给 **IC50**；%inhibition 条件列若源中无对应汇总，则留空。
 
+## 读取范围
+
+- 读取：`Signature`、`Summary`
+- 跳过：`Raw Data IC50`、`IC50 Curve`、`Protocol`
+
 ## 主源
 
 - **主源**：`Summary` 中 `Summary-HCT116` 表（含 Compound ID、R_IC50 / A_IC50 等）

@@ -6,38 +6,13 @@ import statistics
 
 from ..schemas import ColumnDef
 
-_FOCUS_CORE = re.compile(
-    r"cover|封面|pk 参数|pk parameters|试验设计|study design",
-    re.I,
-)
-_FOCUS_SUMMARY = re.compile(r"data summary|结果汇总", re.I)
-_SKIP = re.compile(r"raw data|原始数据|lc-ms|标曲|formulation|clinical observation", re.I)
+from .sheet_focus import focus_content_for_model  # noqa: F401 — 兼容旧 import
+
 _HW = re.compile(r"HW[\w\-]+", re.I)
 _SKIP_ROW = re.compile(
     r"^(n|sd|cv|cv\s*\(%\)|g\d+-sd|g\d+-cv|animal no\.?|sort)$",
     re.I,
 )
-
-
-def focus_content_for_model(content: str) -> str:
-    """只送封面 + PK 参数 + 试验设计。有参数页就不再带结果汇总，避免一次识别被拆成多次模型调用。"""
-    parts = [p for p in re.split(r"(?=^### )", content or "", flags=re.M) if p.strip()]
-    if not parts:
-        return content or ""
-    core: list[str] = []
-    summary: list[str] = []
-    for p in parts:
-        head = p.splitlines()[0]
-        if _SKIP.search(head):
-            continue
-        if _FOCUS_CORE.search(head):
-            core.append(p)
-        elif _FOCUS_SUMMARY.search(head):
-            summary.append(p)
-    kept = core or summary
-    if kept:
-        return "\n".join(kept)
-    return content or ""
 
 
 def _clean(s: str) -> str:

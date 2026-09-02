@@ -52,3 +52,68 @@ class ChatStreamApiTest(unittest.TestCase):
         self.assertIn("正在解析附件 1/1：tiny.csv", body)
         self.assertIn("正在匹配 Skill", body)
         self.assertIn("event: done", body)
+
+    def test_stream_why_missing_does_not_parse_files(self):
+        client = TestClient(app)
+        up = client.post(
+            "/api/recognize/upload",
+            files={"file": ("tiny.csv", b"cpds_id,v\nA,1\n", "text/csv")},
+        )
+        fid = up.json()["file_id"]
+        with client.stream(
+            "POST",
+            "/api/recognize/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": "为啥HW350003A化合物数据没有？"}],
+                "columns": [
+                    {"field": "cpds_id", "title": "ID", "type": "text"},
+                    {"field": "cl", "title": "CL", "type": "number"},
+                ],
+                "file_ids": [fid],
+                "auto_skill": True,
+                "rows": [{"cpds_id": "HW1", "cl": "0.20"}],
+            },
+        ) as res:
+            self.assertEqual(res.status_code, 200)
+            body = "".join(res.iter_text())
+        self.assertIn("正在理解你的问题", body)
+        self.assertNotIn("正在解析附件", body)
+        self.assertNotIn("正在匹配 Skill", body)
+        self.assertNotIn("正在读取", body)
+        self.assertIn('"intent": "chat"', body)
+        self.assertIn("HW1", body)
+        self.assertIn("不抽数", body)
+
+    def test_stream_decimal_edit_does_not_reimport(self):
+        client = TestClient(app)
+        up = client.post(
+            "/api/recognize/upload",
+            files={"file": ("tiny.csv", b"cpds_id,v\nA,1\n", "text/csv")},
+        )
+        fid = up.json()["file_id"]
+        with client.stream(
+            "POST",
+            "/api/recognize/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": "小数位数超过2位的都要改成2位小数"}],
+                "columns": [
+                    {"field": "cpds_id", "title": "ID", "type": "text"},
+                    {"field": "cl", "title": "CL", "type": "number"},
+                ],
+                "file_ids": [fid],
+                "auto_skill": True,
+                "rows": [
+                    {"cpds_id": "HW1", "cl": "0.2046234"},
+                    {"cpds_id": "HW2", "cl": "1.2"},
+                ],
+            },
+        ) as res:
+            self.assertEqual(res.status_code, 200)
+            body = "".join(res.iter_text())
+        self.assertIn("正在按你的要求改已填格子", body)
+        self.assertNotIn("正在解析附件", body)
+        self.assertNotIn("正在匹配 Skill", body)
+        self.assertIn('"intent": "edit"', body)
+        self.assertIn("0.20", body)
+        self.assertIn("没有重新识别", body)
+        self.assertNotIn("CHO01", body)

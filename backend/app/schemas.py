@@ -68,6 +68,7 @@ class ChatRequest(BaseModel):
     file_ids: list[str] = []         # 多文件（与 file_id 合并去重）
     table_name: Optional[str] = None
     auto_skill: bool = True
+    rows: list[dict] = []            # 当前已填入结果表的行；问答/改格子时作上下文，不再抽文件
 
 
 class ChatResponse(BaseModel):
