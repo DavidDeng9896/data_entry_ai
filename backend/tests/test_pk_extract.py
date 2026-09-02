@@ -3,6 +3,7 @@ from pathlib import Path
 
 from app.schemas import ColumnDef
 from app.services import file_parser
+from app.services.ai_service import _is_pk_target
 from app.services.pk_extract import focus_content_for_model, mock_extract_pk
 
 COLS = [
@@ -34,6 +35,13 @@ class PkExtractTest(unittest.TestCase):
         self.assertIn("PK 参数", focused)
         self.assertNotIn("原始数据", focused)
         self.assertLess(len(focused), len(text) / 2)
+
+    def test_pk_target_detection(self):
+        self.assertTrue(_is_pk_target("Dog PK", COLS))
+        self.assertFalse(_is_pk_target("hERG", [
+            ColumnDef(field="cpds_id", title="ID"),
+            ColumnDef(field="ic50_um", title="IC50"),
+        ]))
 
     def test_mock_dog_pk(self):
         text = _parse("DM-RF-2025022001（HW350003A)DPK检测报告.xlsx")

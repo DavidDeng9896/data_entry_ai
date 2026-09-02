@@ -12,6 +12,7 @@ from .. import database as db
 from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 from .pk_extract import focus_content_for_model, mock_extract_pk
+from .row_merge import merge_extracted_rows, summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
 _LLM_CHUNK_CHARS = 24000
@@ -62,6 +63,11 @@ def compact_file_for_qa(content: str, file_meta: dict | None, limit: int = _QA_F
 def friendly_llm_error(exc: BaseException) -> str:
     raw = str(exc) or type(exc).__name__
     low = raw.lower()
+    if "429" in raw or "rate_limit" in low or "用量上限" in raw:
+        return (
+            "模型配额不足（429）。当前 Token Plan 已用尽或触发限流。"
+            "请在 MiniMax 控制台充值/升级后再识别；设置里也可临时打开 Mock 跑通交互。"
+        )
     if "504" in raw or "502" in raw or "timeout" in low or "timed out" in low or "gateway" in low:
         return (
             "模型网关超时（504）。附件较大或服务繁忙时会出现。"
@@ -317,22 +323,27 @@ def _build_system_prompt(
 
 
 def _extract_json_array(text: str) -> list[dict]:
-    """从模型输出中提取 JSON 数组，容忍 ```json 包裹和前后杂文本"""
-    text = text.strip()
+    parsed = _try_json_array(text)
+    return parsed if parsed is not None else []
+
+
+def _try_json_array(text: str) -> list[dict] | None:
+    """解析 JSON 数组；失败返回 None，以便与合法的空数组 [] 区分。"""
+    text = strip_model_noise(text or "")
     m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
     if m:
         text = m.group(1).strip()
     start = text.find("[")
     end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
+    if start == -1 or end == -1 or end <= start:
+        return None
     try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return [dict(item) for item in data if isinstance(item, dict)]
+        data = json.loads(text[start:end + 1])
     except json.JSONDecodeError:
-        pass
-    return []
+        return None
+    if not isinstance(data, list):
+        return None
+    return [dict(item) for item in data if isinstance(item, dict)]
 
 
 def _mock_rows(columns: list[ColumnDef]) -> list[dict]:
@@ -439,13 +450,35 @@ def _client(cfg: dict) -> OpenAI:
     return OpenAI(
         base_url=cfg["base_url"],
         api_key=cfg["api_key"] or "sk-empty",
-        timeout=45.0,
+        timeout=120.0,
         max_retries=0,
     )
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def strip_model_noise(text: str) -> str:
+    """去掉 MiniMax 等模型写进 content 的思考块，避免污染 <<<ROWS>>> / JSON 抽取。"""
+    text = text or ""
+    text = _THINK_BLOCK.sub("", text)
+    text = re.sub(r"<think>.*", "", text, flags=re.S | re.I)
+    return text.strip()
+
+
+def _delta_text(delta) -> str:
+    if not delta:
+        return ""
+    parts: list[str] = []
+    if getattr(delta, "content", None):
+        parts.append(delta.content)
+    return "".join(parts)
+
+
 def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: float = 0) -> str:
     last: BaseException | None = None
+    # MiniMax-M2.x 思考关不掉；reasoning_split 把思考放到 reasoning_content，避免污染 content。
+    extra_body = {"reasoning_split": True}
     for attempt in range(3):
         try:
             stream = True if attempt == 0 else False
@@ -454,21 +487,25 @@ def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: 
                 messages=messages,
                 temperature=temperature,
                 stream=stream,
+                extra_body=extra_body,
             )
             if stream:
                 parts: list[str] = []
                 for ev in resp:
                     if not ev.choices:
                         continue
-                    delta = ev.choices[0].delta
-                    if delta and delta.content:
-                        parts.append(delta.content)
-                return "".join(parts)
-            return resp.choices[0].message.content or ""
+                    parts.append(_delta_text(ev.choices[0].delta))
+                return strip_model_noise("".join(parts))
+            msg = resp.choices[0].message
+            return strip_model_noise(msg.content or "")
         except Exception as e:
             last = e
             msg = str(e).lower()
             stream_unsupported = "stream" in msg and ("not" in msg or "unsupport" in msg or "invalid" in msg)
+            extra_unsupported = "reasoning_split" in msg or "extra_body" in msg or "unexpected" in msg
+            if extra_unsupported and extra_body:
+                extra_body = {}
+                continue
             if stream_unsupported and attempt == 0:
                 continue
             if not _retryable_llm_error(e) or attempt >= 2:
@@ -542,9 +579,17 @@ def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file
     return reply, []
 
 
+def _is_pk_target(table_name: str, columns: list[ColumnDef]) -> bool:
+    name = (table_name or "").lower()
+    if "pk" in name:
+        return True
+    fields = " ".join((c.field or "").lower() for c in (columns or []))
+    return any(k in fields for k in ("auc", "cmax", "vss", "pct_f", "iv_1mpk", "po_"))
+
+
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
          file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
-         table_name: str = "") -> tuple[str, list[dict]]:
+         table_name: str = "", on_progress=None) -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
@@ -555,11 +600,14 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         msgs.append({"role": m.role, "content": m.content})
 
     if file_content and intent != "chat":
-        focused = focus_content_for_model(file_content)
-        if focused:
-            file_content = focused
-            if file_meta is not None:
-                file_meta = {**file_meta, "chars": len(focused)}
+        # PK 报告原始数据页极大，只送封面/参数页避免 504。
+        # 其它 CRO 报告若也裁成「封面」，会把 Assay Summary 等主源丢掉。
+        if _is_pk_target(table_name, columns):
+            focused = focus_content_for_model(file_content)
+            if focused:
+                file_content = focused
+                if file_meta is not None:
+                    file_meta = {**file_meta, "chars": len(focused)}
 
     if file_content:
         if intent == "chat":
@@ -577,24 +625,32 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                     )
                 cfg = settings["text_model"]
                 client = _client(cfg)
-                merged_rows: list[dict] = []
-                notes: list[str] = []
+                chunk_results: list[tuple[str, list[dict]]] = []
                 total = len(chunks)
                 for i, chunk in enumerate(chunks, 1):
+                    if on_progress:
+                        on_progress(f"第 {i}/{total} 段识别中（共 {total} 段）")
                     piece_msgs = list(msgs) + [{
                         "role": "user",
                         "content": (
-                            f"[完整解析后的第 {i}/{total} 页，不是截断丢弃]\n"
+                            f"[这是完整解析的第 {i}/{total} 段，按 Sheet 分页，不是截断丢弃。"
+                            f"其他段可能含封面/方法/结论；本段找不到主源就输出空数组，不要把本段当成整份报告。]\n"
                             f"{chunk}"
                         ),
                     }]
                     raw = _complete(client, cfg["model"], piece_msgs)
                     note, rows = _split_chat_reply(raw, columns)
-                    if note:
-                        notes.append(note)
-                    merged_rows.extend(rows)
-                reply = "\n".join(notes).strip() or f"已分页识别 {len(merged_rows)} 行（{total} 段）。"
-                return reply, merged_rows
+                    chunk_results.append((note, rows or []))
+                raw_rows = [r for _, rs in chunk_results for r in rs]
+                merged, conflicts = merge_extracted_rows(raw_rows, key_field="cpds_id")
+                reply = summarize_chunk_notes(chunk_results)
+                if len(merged) < len(raw_rows):
+                    reply += f"\n已按化合物 ID 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
+                if conflicts:
+                    reply += (
+                        f"\n有 {len(conflicts)} 处分页取值不一致，已保留先出现的值并在表中标黄，请核对后再确认导入。"
+                    )
+                return reply, merged
 
     if settings["mock"]:
         return _mock_chat_reply(
@@ -604,20 +660,37 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
 
     cfg = settings["text_model"]
     client = _client(cfg)
+    if on_progress:
+        on_progress("正在调用模型识别…")
     raw = _complete(client, cfg["model"], msgs)
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []
-    return reply, rows
+    merged, conflicts = merge_extracted_rows(rows or [], key_field="cpds_id")
+    if conflicts:
+        reply = (reply or "") + f"\n有 {len(conflicts)} 处重复行取值不一致，已合并并标黄。"
+    return reply, merged
 
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:
-    """把模型回复拆成：对话文本 + <<<ROWS>>> 后的 JSON 行数据"""
-    if "<<<ROWS>>>" in raw:
-        text, _, rows_part = raw.partition("<<<ROWS>>>")
-        rows = _extract_json_array(rows_part)
-        return text.strip(), rows
-    return raw.strip(), []
+    """把模型回复拆成：对话文本 + <<<ROWS>>> 后的 JSON 行数据。
+    MiniMax 常在思考里复述标记，又在 JSON 后再写一次 <<<ROWS>>>，
+    因此从后往前找第一段能解析的数组。"""
+    raw = strip_model_noise(raw)
+    if "<<<ROWS>>>" not in raw:
+        rows = _extract_json_array(raw)
+        return raw.strip(), rows
+    pieces = raw.split("<<<ROWS>>>")
+    text = pieces[0].strip()
+    rows: list[dict] | None = None
+    for piece in reversed(pieces[1:]):
+        parsed = _try_json_array(piece)
+        if parsed is not None:
+            rows = parsed
+            break
+    if rows is None:
+        rows = _extract_json_array(raw)
+    return text, rows
 
 
 def recognize_image(file_id: str, columns: list[ColumnDef], skill_content: str | None) -> tuple[list[dict], str]:

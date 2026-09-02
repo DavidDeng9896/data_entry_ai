@@ -88,6 +88,36 @@ def _df_to_markdown(df: pd.DataFrame) -> str:
     return df.to_markdown(index=False)
 
 
+def _read_excel_sheets(path: Path) -> dict:
+    """CRO 报告里常见：xls、伪 xlsx、openpyxl 自定义属性 name=None。逐个引擎兜底。"""
+    errors: list[str] = []
+    for engine in (None, "calamine", "openpyxl", "xlrd"):
+        try:
+            kw = {"sheet_name": None, "dtype": str, "header": None}
+            if engine:
+                kw["engine"] = engine
+            return pd.read_excel(path, **kw)
+        except Exception as e:
+            errors.append(f"{engine or 'auto'}: {e}")
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+        out = {}
+        for ws in wb.worksheets:
+            rows = [list(r) for r in ws.iter_rows(values_only=True)]
+            if not rows:
+                continue
+            out[ws.title] = pd.DataFrame(rows)
+        wb.close()
+        if out:
+            return out
+        errors.append("openpyxl-readonly: empty")
+    except Exception as e:
+        errors.append(f"openpyxl-readonly: {e}")
+    raise ValueError("无法解析 Excel：" + " | ".join(errors)[:600])
+
+
 def _parse_excel(path: Path) -> str:
     ext = path.suffix.lower()
     parts = []
@@ -96,7 +126,7 @@ def _parse_excel(path: Path) -> str:
         df = pd.read_csv(path, sep=sep, engine="python", dtype=str, header=None)
         parts.append(_df_to_markdown(df))
     else:
-        sheets = pd.read_excel(path, sheet_name=None, dtype=str, header=None)
+        sheets = _read_excel_sheets(path)
         for name, df in sheets.items():
             md = _df_to_markdown(df)
             if md:

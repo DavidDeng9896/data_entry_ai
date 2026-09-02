@@ -1,4 +1,7 @@
+import os
 import unittest
+
+os.environ["DATA_ENTRY_FORCE_MOCK"] = "1"
 
 from fastapi.testclient import TestClient
 

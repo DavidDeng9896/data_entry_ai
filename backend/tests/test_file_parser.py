@@ -25,5 +25,20 @@ class ParseToTextTruncateTest(unittest.TestCase):
         self.assertTrue(text.startswith("X" * 100))
 
 
+class ExcelFallbackTest(unittest.TestCase):
+    def test_xls_mms_parses_with_xlrd(self):
+        path = Path("/workspace/doc/EO035/EO035药理测试原始数据/ADME性质/D-RF-2024031105(HW350001)-MMS-20240315.xls")
+        sheets = file_parser._read_excel_sheets(path)
+        self.assertTrue(sheets)
+
+    def test_wrn_custom_docprops_parses_readonly(self):
+        path = Path(
+            "/workspace/doc/EO035/EO035药理测试原始数据/酶活IC50原始数据/"
+            "Report_RFP-2024091402_WRN(517-1238)_ATP preincubation_FI_IC50_20240918.xlsx"
+        )
+        sheets = file_parser._read_excel_sheets(path)
+        self.assertTrue(sheets)
+
+
 if __name__ == "__main__":
     unittest.main()

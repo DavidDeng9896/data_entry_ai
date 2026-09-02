@@ -20,6 +20,9 @@ export const api = {
   copyTable: (id, name) => req(`/tables/${id}/copy`, { method: 'POST', body: JSON.stringify({ name }) }),
   getColumns: (tableId) => req(`/tables/${tableId}/columns`),
   saveColumns: (tableId, columns) => req(`/tables/${tableId}/columns`, { method: 'PUT', body: JSON.stringify({ columns }) }),
+  commitImport: (tableId, payload) => req(`/tables/${tableId}/imports`, { method: 'POST', body: JSON.stringify(payload) }),
+  listImports: (tableId) => req(`/tables/${tableId}/imports`),
+  listTableRows: (tableId) => req(`/tables/${tableId}/rows`),
 
   // 设置
   getSettings: () => req('/settings'),

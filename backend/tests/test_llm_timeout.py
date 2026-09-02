@@ -1,9 +1,12 @@
 import unittest
 
+from app.schemas import ColumnDef
 from app.services.ai_service import (
     compact_file_for_qa,
     friendly_llm_error,
     split_file_chunks,
+    strip_model_noise,
+    _split_chat_reply,
 )
 
 
@@ -44,6 +47,32 @@ class FriendlyLlmErrorTest(unittest.TestCase):
         msg = friendly_llm_error(RuntimeError("Error code: 504"))
         self.assertIn("超时", msg)
         self.assertIn("504", msg)
+
+    def test_429_quota(self):
+        msg = friendly_llm_error(RuntimeError("Error code: 429 - 已达到 Token Plan 用量上限"))
+        self.assertIn("配额", msg)
+        self.assertIn("429", msg)
+
+
+class MiniMaxThinkParseTest(unittest.TestCase):
+    def test_strip_think_block(self):
+        raw = "<think>内部复述 <<<ROWS>>> []</think>\n1. 步骤\n<<<ROWS>>>\n[{\"cpds_id\":\"HW1\"}]"
+        self.assertNotIn("<think>", strip_model_noise(raw))
+        self.assertIn("<<<ROWS>>>", strip_model_noise(raw))
+
+    def test_split_uses_visible_rows_not_think_example(self):
+        cols = [ColumnDef(field="cpds_id", title="ID"), ColumnDef(field="ic50_um", title="IC50")]
+        raw = (
+            "<think>输出协议是 <<<ROWS>>> [{\"cpds_id\":\"示例\"}]</think>\n"
+            "1. 已定位 Assay Summary\n"
+            "<<<ROWS>>>\n"
+            "[{\"cpds_id\": \"HW350003A\", \"ic50_um\": \"\"}]\n"
+            "<<<ROWS>>>\n"
+        )
+        note, rows = _split_chat_reply(raw, cols)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["cpds_id"], "HW350003A")
+        self.assertNotIn("<think>", note)
 
 
 if __name__ == "__main__":
