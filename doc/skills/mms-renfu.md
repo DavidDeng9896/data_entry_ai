@@ -14,6 +14,11 @@
 
 `MMS`
 
+## 读取范围
+
+- 读取：`Signature`、`Summary`
+- 跳过：`Raw Data`、`Materials`、`Study Design`
+
 ## 主源
 
 - **主数据块**：`Summary` 中标题含 `Remaining percentage and metabolic stability` 的表（通常为 Table 2）

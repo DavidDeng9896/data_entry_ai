@@ -6,7 +6,8 @@
 ## 与基线的关系
 
 - 基线：`doc/AI_data_import/baseline-system-prompt.md`（勘查方法，不绑死版式）
-- Skill：本目录文件（主源定位、字段映射、过滤、换算）
+- Skill：本目录文件（主源定位、**读取哪些 sheet**、字段映射、过滤、换算）
+- 无 Skill 时：按 sheet 名自判结论页 vs 原始数据页，不把某 CRO 的页名写进基线提示词
 
 ## 清单
 

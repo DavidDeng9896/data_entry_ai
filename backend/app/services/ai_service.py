@@ -11,7 +11,8 @@ from openai import OpenAI
 from .. import database as db
 from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
-from .pk_extract import focus_content_for_model, mock_extract_pk
+from .pk_extract import mock_extract_pk
+from .sheet_focus import focus_content_for_model
 from .row_merge import merge_extracted_rows, summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
@@ -570,6 +571,7 @@ def _complete(client: OpenAI, model: str, messages: list[dict], *,
 def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | None,
                    table_name: str = "") -> tuple[list[dict], str]:
     settings = db.load_model_settings()
+    content = focus_content_for_model(content, skill_content) or content
     if settings["mock"]:
         simulated = _mock_extract_with_skill(content, columns, skill_content, table_name=table_name)
         if simulated:
@@ -699,14 +701,11 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         msgs.append({"role": "user", "content": table_rows_context(table_rows, columns)})
 
     if file_content and intent != "chat":
-        # PK 报告原始数据页极大，只送封面/参数页避免 504。
-        # 其它 CRO 报告若也裁成「封面」，会把 Assay Summary 等主源丢掉。
-        if _is_pk_target(table_name, columns) and not settings.get("mock"):
-            focused = focus_content_for_model(file_content)
-            if focused:
-                file_content = focused
-                if file_meta is not None:
-                    file_meta = {**file_meta, "chars": len(focused)}
+        focused = focus_content_for_model(file_content, skill_content)
+        if focused:
+            file_content = focused
+            if file_meta is not None:
+                file_meta = {**file_meta, "chars": len(focused)}
 
     if file_content:
         chunks = split_file_chunks(file_content)

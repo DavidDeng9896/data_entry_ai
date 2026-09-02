@@ -46,17 +46,13 @@ class PkExtractTest(unittest.TestCase):
         self.assertNotIn("原始数据", focused)
         self.assertLess(len(focused), len(text) / 2)
 
-    def test_rat_keeps_pk_param_sheet_without_space(self):
-        """普瑞昇大鼠报告：有结果汇总时仍要送 PK参数 页（无空格），不能只留封面。"""
+    def test_rat_with_pk_skill_keeps_pkparam(self):
+        skill = Path("/workspace/doc/skills/pk-precent-winnonlin.md").read_text(encoding="utf-8")
         text = _parse_glob(RAT_FOLDER, "*2025020702*")
-        self.assertIn("### Sheet: PK参数", text)
-        self.assertIn("### Sheet: 结果汇总", text)
-        focused = focus_content_for_model(text)
+        focused = focus_content_for_model(text, skill)
         self.assertIn("### Sheet: PK参数", focused)
-        self.assertIn("### Sheet: 结果汇总", focused)
         self.assertIn("Cl_obs", focused)
         self.assertNotIn("### Sheet: 原始数据", focused)
-        self.assertNotIn("### Sheet: 试验设计", focused)
 
     def test_focus_synthetic_pk_param_no_space_with_summary(self):
         text = "\n".join([

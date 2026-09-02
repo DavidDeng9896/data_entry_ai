@@ -14,6 +14,11 @@ WRN 等生化抑制 IC50 报告（RFP / FI assay）。
 
 > 注：总表侧还有 unwinding 等其它生化表。本 Skill 仅当报告为该 FI/ATP preincubation 模板且用户选择了 ADP-Glo 表时使用。若用户选错目标表，应少填并提示不匹配。
 
+## 读取范围
+
+- 读取：`Signature`、`Assay summary`
+- 跳过：`Assay protocol`、`Raw data analysis`
+
 ## 主源
 
 - `Assay summary` 表（含 Compounds ID、IC50 (nM) 等）
