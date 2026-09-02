@@ -294,7 +294,12 @@ _OUTPUT_CHAT = """## 本次输出协议（多轮对话）
 
 _OUTPUT_CHAT_QA = """## 本次输出协议（本轮仅问答）
 
-本轮用户在提问或补充规则，**不要识别、不要输出 <<<ROWS>>>、不要给出填表 JSON**。用简短中文回答即可。
+本轮用户在提问、确认或讨论**已经导入的结果表**，**不要识别、不要重新读附件、不要输出 <<<ROWS>>>、不要给出填表 JSON**。
+
+已导入的行会作为「当前结果表」附在对话里：
+- 问「为啥 xxx 化合物数据没有」时：先在当前表里核对 `cpds_id` / 化合物号是否出现；若没有，根据对话里已知的抽取规则（过滤对照、匹配键、种属表、Skill）解释可能没匹配上的原因。
+- 不要编造该化合物在源文件中的数值，也不要建议「我再导一次」除非用户明确要求再导入。
+- 用简短中文回答即可。
 """
 
 
@@ -585,6 +590,43 @@ def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | 
     return rows, "" if rows else "模型未返回有效数据，请检查内容或模型配置"
 
 
+def table_rows_context(rows: list[dict] | None, columns: list[ColumnDef], limit: int = 200) -> str:
+    """把已填格子做成问答上下文，避免再解析附件。"""
+    fields = [c.field for c in (columns or []) if c.field]
+    titles = [(c.title or c.field) for c in (columns or []) if c.field]
+    if not fields:
+        fields = []
+        for row in rows or []:
+            for k in row.keys():
+                if k not in fields and not str(k).startswith("_"):
+                    fields.append(k)
+        titles = fields
+    if not rows:
+        return (
+            "[当前结果表还没有已填入的行。"
+            "回答「为啥没有某化合物」时只能根据对话历史说明可能原因；不要猜测源文件里有没有，也不要抽数。]"
+        )
+    shown = rows[:limit]
+    header = "| " + " | ".join(titles) + " |"
+    sep = "| " + " | ".join("---" for _ in titles) + " |"
+    lines = [header, sep]
+    for row in shown:
+        cells = []
+        for f in fields:
+            v = row.get(f, "")
+            if v is None:
+                v = ""
+            cells.append(str(v).replace("|", "\\|").replace("\n", " "))
+        lines.append("| " + " | ".join(cells) + " |")
+    extra = f"\n（仅展示前 {limit} 行，共 {len(rows)} 行）" if len(rows) > limit else ""
+    return (
+        f"[当前结果表已导入 {len(rows)} 行。用户问某化合物为什么没有时，先在这些行里找是否匹配；"
+        f"没有匹配就解释可能原因，不要重新抽数，不要输出 <<<ROWS>>>。]\n"
+        + "\n".join(lines)
+        + extra
+    )
+
+
 def _file_user_message(file_content: str, file_meta: dict | None) -> str:
     chars = (file_meta or {}).get("chars")
     if chars is None:
@@ -602,12 +644,17 @@ def _file_user_message(file_content: str, file_meta: dict | None) -> str:
 
 def _mock_chat_reply(messages: list[ChatMessage], columns: list[ColumnDef], file_content: str | None,
                      skill_content: str | None = None, *, intent: str = "recognize",
-                     table_name: str = "") -> tuple[str, list[dict]]:
+                     table_name: str = "", table_rows: list[dict] | None = None) -> tuple[str, list[dict]]:
     """mock 模式：仅识别意图才抽数填表。"""
     rules = [m.content for m in messages if m.role == "user" and m.content.strip()]
     last = rules[-1] if rules else ""
     if intent != "recognize":
-        return f"收到你的问题：{last or '（空）'}。本轮按问答处理，不抽数填表（mock 模式）。", []
+        ids = [str(r.get("cpds_id")) for r in (table_rows or []) if r.get("cpds_id")]
+        id_note = f"当前表化合物：{', '.join(ids[:20])}。" if ids else "当前表还没有化合物行。"
+        return (
+            f"收到你的问题：{last or '（空）'}。{id_note} 本轮按问答处理，不抽数填表（mock 模式）。",
+            [],
+        )
     if file_content:
         time.sleep(0.05)
         simulated = _mock_extract_with_skill(file_content, columns, skill_content, table_name=table_name)
@@ -637,7 +684,7 @@ def _is_pk_target(table_name: str, columns: list[ColumnDef]) -> bool:
 
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
          file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
-         table_name: str = "", on_progress=None) -> tuple[str, list[dict]]:
+         table_name: str = "", table_rows: list[dict] | None = None, on_progress=None) -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
@@ -646,6 +693,10 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     msgs: list[dict] = [{"role": "system", "content": system}]
     for m in messages:
         msgs.append({"role": m.role, "content": m.content})
+
+    if intent == "chat":
+        file_content = None
+        msgs.append({"role": "user", "content": table_rows_context(table_rows, columns)})
 
     if file_content and intent != "chat":
         # PK 报告原始数据页极大，只送封面/参数页避免 504。
@@ -658,58 +709,55 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                     file_meta = {**file_meta, "chars": len(focused)}
 
     if file_content:
-        if intent == "chat":
-            msgs.append({"role": "user", "content": compact_file_for_qa(file_content, file_meta)})
+        chunks = split_file_chunks(file_content)
+        if len(chunks) <= 1:
+            msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
         else:
-            chunks = split_file_chunks(file_content)
-            if len(chunks) <= 1:
-                msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
-            else:
-                # 分页调用，合并行
-                if settings["mock"]:
-                    return _mock_chat_reply(
-                        messages, columns, file_content, skill_content,
-                        intent=intent, table_name=table_name,
-                    )
-                cfg = settings["text_model"]
-                client = _client(cfg)
-                chunk_results: list[tuple[str, list[dict]]] = []
-                total = len(chunks)
-                for i, chunk in enumerate(chunks, 1):
-                    if on_progress:
-                        on_progress(f"第 {i}/{total} 段识别中（共 {total} 段）")
-                    piece_msgs = list(msgs) + [{
-                        "role": "user",
-                        "content": (
-                            f"[这是完整解析的第 {i}/{total} 段，按 Sheet 分页，不是截断丢弃。"
-                            f"其他段可能含封面/方法/结论；本段找不到主源就输出空数组，不要把本段当成整份报告。]\n"
-                            f"{chunk}"
-                        ),
-                    }]
-                    raw = _complete(client, cfg["model"], piece_msgs, on_progress=on_progress)
-                    note, rows = _split_chat_reply(raw, columns)
-                    chunk_results.append((note, rows or []))
-                raw_rows = [r for _, rs in chunk_results for r in rs]
-                merged, conflicts = merge_extracted_rows(raw_rows, key_field="cpds_id")
-                reply = summarize_chunk_notes(chunk_results)
-                if len(merged) < len(raw_rows):
-                    reply += f"\n已按化合物 ID 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
-                if conflicts:
-                    reply += (
-                        f"\n有 {len(conflicts)} 处分页取值不一致，已保留先出现的值并在表中标黄，请核对后再确认导入。"
-                    )
-                return reply, merged
+            # 分页调用，合并行
+            if settings["mock"]:
+                return _mock_chat_reply(
+                    messages, columns, file_content, skill_content,
+                    intent=intent, table_name=table_name, table_rows=table_rows,
+                )
+            cfg = settings["text_model"]
+            client = _client(cfg)
+            chunk_results: list[tuple[str, list[dict]]] = []
+            total = len(chunks)
+            for i, chunk in enumerate(chunks, 1):
+                if on_progress:
+                    on_progress(f"第 {i}/{total} 段识别中（共 {total} 段）")
+                piece_msgs = list(msgs) + [{
+                    "role": "user",
+                    "content": (
+                        f"[这是完整解析的第 {i}/{total} 段，按 Sheet 分页，不是截断丢弃。"
+                        f"其他段可能含封面/方法/结论；本段找不到主源就输出空数组，不要把本段当成整份报告。]\n"
+                        f"{chunk}"
+                    ),
+                }]
+                raw = _complete(client, cfg["model"], piece_msgs, on_progress=on_progress)
+                note, rows = _split_chat_reply(raw, columns)
+                chunk_results.append((note, rows or []))
+            raw_rows = [r for _, rs in chunk_results for r in rs]
+            merged, conflicts = merge_extracted_rows(raw_rows, key_field="cpds_id")
+            reply = summarize_chunk_notes(chunk_results)
+            if len(merged) < len(raw_rows):
+                reply += f"\n已按化合物 ID 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
+            if conflicts:
+                reply += (
+                    f"\n有 {len(conflicts)} 处分页取值不一致，已保留先出现的值并在表中标黄，请核对后再确认导入。"
+                )
+            return reply, merged
 
     if settings["mock"]:
         return _mock_chat_reply(
             messages, columns, file_content, skill_content,
-            intent=intent, table_name=table_name,
+            intent=intent, table_name=table_name, table_rows=table_rows,
         )
 
     cfg = settings["text_model"]
     client = _client(cfg)
     if on_progress:
-        on_progress("正在调用模型识别…")
+        on_progress("正在调用模型…" if intent == "chat" else "正在调用模型识别…")
     raw = _complete(client, cfg["model"], msgs, on_progress=on_progress)
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":

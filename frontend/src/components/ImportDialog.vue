@@ -348,13 +348,20 @@ const primaryAction = computed(() => {
   }
   return { kind: 'stop', icon: 'ri-stop-mini-fill', title: '停止', disabled: false }
 })
-const thinkingLabel = computed(() => (streamIntent.value === 'chat' ? '思考中' : '识别中'))
+const thinkingLabel = computed(() => {
+  if (streamIntent.value === 'chat') return '思考中'
+  if (streamIntent.value === 'edit') return '改表中'
+  return '识别中'
+})
 const composerPlaceholder = computed(() => {
   if (isUploadingFiles.value) return '正在上传附件…'
   if (chatThinking.value) {
-    return hasDraft.value ? '发送即打断并按新指令重导' : '识别中，点方块停止'
+    if (hasDraft.value) return '发送即打断并按新指令重导'
+    if (streamIntent.value === 'chat') return '思考中…'
+    if (streamIntent.value === 'edit') return '正在改已填格子…'
+    return '识别中，点方块停止'
   }
-  if (hasReadyFiles.value) return '可补充要求后发送；空发送会识别附件，追问则只聊天'
+  if (hasReadyFiles.value) return '可提问、改已填格子，或给出新抽取规则后再导；空发送会再识别附件'
   return '上传附件或描述规则，Enter 发送，Shift+Enter 换行'
 })
 
@@ -745,6 +752,14 @@ function skillPayload() {
   return { skill_id: Number.isFinite(id) ? id : null, auto_skill: false }
 }
 
+function currentFilledRows() {
+  return filledRows(tableData.value, columns.value).map((row) => {
+    const out = {}
+    for (const c of columns.value) out[c.field] = row[c.field] ?? ''
+    return out
+  })
+}
+
 async function runTurn() {
   turnSeq += 1
   const myTurn = turnSeq
@@ -769,7 +784,8 @@ async function runTurn() {
       columns: columns.value,
       ...skillPayload(),
       file_ids: readyFileIds.value,
-      table_name: props.tableName || ''
+      table_name: props.tableName || '',
+      rows: currentFilledRows()
     }, {
       signal: abortCtrl.value.signal,
       onStep: (step) => {
@@ -807,7 +823,12 @@ async function runTurn() {
     assistant.streaming = false
     assistant.content = res.reply || ''
     if (res.intent) streamIntent.value = res.intent
-    if (res.intent !== 'chat' && res.rows && res.rows.length) {
+    if (res.intent === 'edit' && Array.isArray(res.rows)) {
+      applyRows(res.rows, { replace: true })
+      notice.value = res.reply || '已按要求改了已填格子，没有重新识别'
+      noticeType.value = 'success'
+      validateFilled()
+    } else if (res.intent !== 'chat' && res.rows && res.rows.length) {
       applyRows(res.rows, { replace: true })
       lastSkillName.value = res.skill_name || ''
       const skillHint = res.skill_name ? `（Skill：${res.skill_name}）` : ''

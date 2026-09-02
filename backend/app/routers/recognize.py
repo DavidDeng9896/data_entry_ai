@@ -13,6 +13,7 @@ from ..services.ai_service import friendly_llm_error
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
 from ..services.row_merge import compose_extraction_reply, merge_extracted_rows
+from ..services.table_edit import apply_local_edit
 
 router = APIRouter(prefix="/api/recognize", tags=["recognize"])
 
@@ -98,6 +99,27 @@ def _skill_meta_payload(resolved: dict) -> dict:
     }
 
 
+def _sanitize_rows(rows) -> list[dict]:
+    out = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        out.append({
+            str(k): ("" if v is None else v)
+            for k, v in r.items()
+            if not str(k).startswith("_")
+        })
+    return out
+
+
+def _classify_req(req: ChatRequest) -> tuple[str, list[str], list[dict], str]:
+    file_ids = _resolve_file_ids(req)
+    last = _last_user_text(req.messages)
+    table_rows = _sanitize_rows(getattr(req, "rows", None))
+    intent = classify_intent(last, has_files=bool(file_ids), has_rows=bool(table_rows))
+    return intent, file_ids, table_rows, last
+
+
 def _resolve_for_request(req: ChatRequest | RecognizeRequest, file_content: str | None, *, allow_auto: bool) -> dict:
     skills = db.list_skills_full()
     settings = db.load_model_settings()
@@ -116,33 +138,60 @@ def _resolve_for_request(req: ChatRequest | RecognizeRequest, file_content: str 
     )
 
 
+def _qa_skill_meta(req: ChatRequest) -> dict:
+    skill_content = db.get_skill_content(req.skill_id) if req.skill_id else None
+    skill_row = db.get_skill(req.skill_id) if req.skill_id else None
+    return {
+        "skill_id": req.skill_id,
+        "skill_name": skill_row["name"] if skill_row else None,
+        "skill_auto": False,
+        "skill_reason": "问答轮次不自动匹配 Skill" if not req.skill_id else "用户指定",
+        "skill_content": skill_content,
+    }
+
+
 def _run_chat(req: ChatRequest) -> dict:
-    file_ids = _resolve_file_ids(req)
+    intent, file_ids, table_rows, last = _classify_req(req)
+
+    if intent == "edit":
+        reply, rows, ok = apply_local_edit(last, table_rows, req.columns)
+        if ok:
+            return {
+                "reply": reply,
+                "rows": rows,
+                "intent": "edit",
+                "file_meta": {"count": 0, "chars": 0, "truncated": False},
+                **_skill_meta_payload({
+                    "skill_id": None,
+                    "skill_name": None,
+                    "skill_auto": False,
+                    "skill_reason": "只改已填格子，未重新识别",
+                }),
+            }
+        intent = "chat"
+
+    if intent == "chat":
+        resolved = _qa_skill_meta(req)
+        file_meta = {"count": 0, "chars": 0, "truncated": False}
+        reply, _rows = ai_service.chat(
+            req.messages, req.columns, resolved.get("skill_content"), None,
+            intent="chat", file_meta=file_meta, table_name=req.table_name or "",
+            table_rows=table_rows,
+        )
+        return {
+            "reply": reply,
+            "rows": [],
+            "intent": "chat",
+            "file_meta": file_meta,
+            **_skill_meta_payload(resolved),
+        }
+
     items = _load_file_items(file_ids)
-    last = _last_user_text(req.messages)
-    intent = classify_intent(last, has_files=bool(file_ids))
     file_meta = {
         "count": len(items),
         "chars": sum(i["chars"] for i in items),
         "truncated": any(i["truncated"] for i in items),
     }
-
-    if intent == "chat":
-        skill_content = db.get_skill_content(req.skill_id) if req.skill_id else None
-        skill_row = db.get_skill(req.skill_id) if req.skill_id else None
-        resolved = {
-            "skill_id": req.skill_id,
-            "skill_name": skill_row["name"] if skill_row else None,
-            "skill_auto": False,
-            "skill_reason": "问答轮次不自动匹配 Skill" if not req.skill_id else "用户指定",
-            "skill_content": skill_content,
-        }
-        joined = "\n\n---\n\n".join(i["text"] for i in items) if items else None
-        reply, rows = ai_service.chat(
-            req.messages, req.columns, resolved.get("skill_content"), joined,
-            intent=intent, file_meta=file_meta, table_name=req.table_name or "",
-        )
-        return {"reply": reply, "rows": rows, "intent": intent, "file_meta": file_meta, **_skill_meta_payload(resolved)}
 
     if not items:
         resolved = _resolve_for_request(req, "", allow_auto=True)
@@ -239,12 +288,11 @@ async def _run_chat_with_progress(*args, **kwargs):
 
 
 async def _aiter_chat_events(req: ChatRequest):
-    file_ids = _resolve_file_ids(req)
-    last = _last_user_text(req.messages)
-    intent = classify_intent(last, has_files=bool(file_ids))
+    intent, file_ids, _table_rows, _last = _classify_req(req)
 
-    if intent == "chat":
-        yield "step", {"text": "正在理解你的问题…", "intent": intent}
+    if intent in ("chat", "edit"):
+        step_text = "正在按你的要求改已填格子…" if intent == "edit" else "正在理解你的问题…"
+        yield "step", {"text": step_text, "intent": intent}
         result = None
         async for kind, payload in _run_in_thread(_run_chat, req):
             if kind == "ping":

@@ -15,9 +15,11 @@ class MockChatIntentTest(unittest.TestCase):
             "lots of file text",
             "skill",
             intent="chat",
+            table_rows=[{"cpds_id": "HW1"}],
         )
         self.assertEqual(rows, [])
         self.assertIn("不抽数", reply)
+        self.assertIn("HW1", reply)
 
     def test_recognize_intent_extracts_demo_rows(self):
         reply, rows = _mock_chat_reply(
