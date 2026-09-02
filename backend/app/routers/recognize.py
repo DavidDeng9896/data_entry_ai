@@ -276,7 +276,7 @@ async def _aiter_chat_events(req: ChatRequest):
     }
     n = len(items)
     if n:
-        yield "step", {"text": f"读取 {n} 个附件，将逐个识别后合并", "intent": intent}
+        yield "step", {"text": f"读取 {n} 个附件，开始识别", "intent": intent}
 
     all_rows: list = []
     chunk_notes: list[tuple[str, list[dict]]] = []
@@ -285,20 +285,33 @@ async def _aiter_chat_events(req: ChatRequest):
         "skill_id": None, "skill_name": None, "skill_auto": True,
         "skill_reason": "", "skill_content": None,
     }
-    for i, item in enumerate(items, 1):
-        label = item.get("label") or item["file_id"]
-        yield "step", {"text": f"附件 {i}/{n}：{label}，正在匹配 Skill…"}
-        resolved = None
+    if items:
+        yield "step", {"text": "正在匹配 Skill…"}
         async for kind, payload in _run_in_thread(
-            _resolve_for_request, req, item["text"], allow_auto=True
+            _resolve_for_request, req, items[0]["text"], allow_auto=True
         ):
             if kind == "ping":
                 yield "ping", payload
             else:
                 resolved = payload
         resolved_list.append(resolved)
-        skill_txt = resolved.get("skill_name") or "仅基线"
-        yield "step", {"text": f"附件 {i}/{n} 匹配 {skill_txt}（{item['chars']} 字）"}
+        yield "step", {"text": f"匹配 {resolved.get('skill_name') or '仅基线'}"}
+
+    async def _chat_one(item: dict):
+        return await asyncio.to_thread(
+            ai_service.chat,
+            req.messages,
+            req.columns,
+            resolved.get("skill_content"),
+            item["text"],
+            intent=intent,
+            file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
+            table_name=req.table_name or "",
+        )
+
+    if n == 1:
+        item = items[0]
+        label = item.get("label") or item["file_id"]
         reply, rows = None, None
         async for kind, payload in _run_chat_with_progress(
             req.messages,
@@ -315,13 +328,34 @@ async def _aiter_chat_events(req: ChatRequest):
                 yield "step", payload
             else:
                 reply, rows = payload
-        n_rows = len(rows or [])
-        yield "step", {"text": f"附件 {i}/{n} 抽出 {n_rows} 行"}
-        note = f"附件 {i}/{n}（{label}）"
+        yield "step", {"text": f"附件 1/1 抽出 {len(rows or [])} 行"}
+        note = f"附件 1/1（{label}）"
         if reply:
             note = f"{note}：{reply}"
         chunk_notes.append((note, rows or []))
         all_rows.extend(rows or [])
+    elif n > 1:
+        yield "step", {"text": f"正在并行识别 {n} 个附件…"}
+
+        async def _run_all():
+            return await asyncio.gather(*[_chat_one(it) for it in items])
+
+        task = asyncio.create_task(_run_all())
+        while not task.done():
+            yield "ping", {}
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+        pairs = task.result()
+        for i, (item, (reply, rows)) in enumerate(zip(items, pairs), 1):
+            label = item.get("label") or item["file_id"]
+            yield "step", {"text": f"附件 {i}/{n} 抽出 {len(rows or [])} 行"}
+            note = f"附件 {i}/{n}（{label}）"
+            if reply:
+                note = f"{note}：{reply}"
+            chunk_notes.append((note, rows or []))
+            all_rows.extend(rows or [])
 
     if not items:
         yield "step", {"text": "未指定模板，仅用基线", "intent": intent}
@@ -345,7 +379,7 @@ async def _aiter_chat_events(req: ChatRequest):
             names.append(nme)
     meta = _skill_meta_payload(resolved)
     if n > 1:
-        meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
+        meta["skill_reason"] = "同一结果表共用 Skill 后并行识别并合并"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     yield "done", {
         "reply": compose_extraction_reply(

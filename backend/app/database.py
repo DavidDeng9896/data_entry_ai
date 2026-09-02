@@ -62,8 +62,10 @@ CREATE TABLE IF NOT EXISTS imported_rows (
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn

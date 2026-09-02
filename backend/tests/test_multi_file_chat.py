@@ -57,6 +57,7 @@ class MultiFileChatTest(unittest.TestCase):
         self.assertNotIn("504", body)
         self.assertIn("正在解析附件 1/4", body)
         self.assertIn("正在匹配 Skill", body)
+        self.assertIn("并行识别 4 个附件", body)
         self.assertIn("附件 1/4", body)
         self.assertIn("附件 4/4", body)
         self.assertIn("event: done", body)
