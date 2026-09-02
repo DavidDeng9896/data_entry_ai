@@ -60,6 +60,13 @@ def compact_file_for_qa(content: str, file_meta: dict | None, limit: int = _QA_F
     )
 
 
+def extra_body_for_model(model: str) -> dict:
+    """只给 MiniMax 加 reasoning_split；千问/其它网关会把未知字段或错误模型名打成 400。"""
+    if "minimax" in (model or "").lower():
+        return {"reasoning_split": True}
+    return {}
+
+
 def friendly_llm_error(exc: BaseException) -> str:
     raw = str(exc) or type(exc).__name__
     low = raw.lower()
@@ -67,6 +74,19 @@ def friendly_llm_error(exc: BaseException) -> str:
         return (
             "模型配额不足（429）。当前 Token Plan 已用尽或触发限流。"
             "请在 MiniMax 控制台充值/升级后再识别；设置里也可临时打开 Mock 跑通交互。"
+        )
+    if (
+        "不支持的模型" in raw
+        or "无可用服务商" in raw
+        or "model_not_found" in low
+        or ("model" in low and "does not exist" in low)
+        or ("model" in low and "not found" in low)
+    ):
+        return (
+            "当前 Base URL 不提供这个模型。"
+            "qwen3.6-flash 只在阿里云百炼（https://dashscope.aliyuncs.com/compatible-mode/v1）可用；"
+            "MiniMax 地址请用 MiniMax-M2.7-highspeed。"
+            "请到设置用「快捷预设」把地址和模型改成同一家，并点测试连接（会真实调用该模型）。"
         )
     if "504" in raw or "502" in raw or "timeout" in low or "timed out" in low or "gateway" in low:
         return (
@@ -262,7 +282,7 @@ _OUTPUT_RECOGNIZE = """## 本次输出协议（一次性识别）
 _OUTPUT_CHAT = """## 本次输出协议（多轮对话）
 
 1. 用户在对话中提出的额外要求或规则（单位换算、列映射、过滤、默认值等）必须记住并遵循；与 Skill 冲突时以更新、更具体的对话约定为准，但仍不得编造数据、不得扩列。
-2. 当本轮是 **识别**（抽取填表）时：先写 3–5 条短步骤（例如：已加载 Skill / 解析附件 / 定位主源 / 映射列 / 完成行数），然后单独一行输出：
+2. 当本轮是 **识别**（抽取填表）时：用一两句说明抽到了什么（不要写「映射 N 列 / 已加载 Skill」这类过程清单，界面会自己显示进度），然后单独一行输出：
 <<<ROWS>>>
 [JSON 数组，每个元素一行数据，key 用字段名，value 用字符串]
 3. 当本轮是 **问答**（解释、确认、补充规则但未要求再识别）时：正常回答即可，不要输出 <<<ROWS>>>，不要抽数覆盖表格。
@@ -475,26 +495,52 @@ def _delta_text(delta) -> str:
     return "".join(parts)
 
 
-def _complete(client: OpenAI, model: str, messages: list[dict], *, temperature: float = 0) -> str:
+def report_stream_progress(buf: str, seen: set, on_progress) -> None:
+    """把模型流式输出转成界面进度，避免停在「映射 N 列」这种过程句上。"""
+    if not on_progress:
+        return
+    compact = buf.replace(" ", "")
+    if "<<<ROWS>>>" in buf or re.search(r"\n\s*\[", buf) or buf.lstrip().startswith("["):
+        if "gen_rows" not in seen:
+            seen.add("gen_rows")
+            on_progress("正在生成结果…")
+        return
+    if re.search(r"映射\s*\d*\s*列", buf) or "映射列" in compact:
+        if "mapping" not in seen:
+            seen.add("mapping")
+            on_progress("正在抽取并生成结果…")
+
+
+def _complete(client: OpenAI, model: str, messages: list[dict], *,
+              temperature: float = 0, on_progress=None) -> str:
     last: BaseException | None = None
-    # MiniMax-M2.x 思考关不掉；reasoning_split 把思考放到 reasoning_content，避免污染 content。
-    extra_body = {"reasoning_split": True}
+    extra_body = extra_body_for_model(model)
     for attempt in range(3):
         try:
             stream = True if attempt == 0 else False
+            kwargs = {}
+            if extra_body:
+                kwargs["extra_body"] = extra_body
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 stream=stream,
-                extra_body=extra_body,
+                **kwargs,
             )
             if stream:
                 parts: list[str] = []
+                seen: set = set()
+                last_len = 0
                 for ev in resp:
                     if not ev.choices:
                         continue
                     parts.append(_delta_text(ev.choices[0].delta))
+                    buf = "".join(parts)
+                    report_stream_progress(buf, seen, on_progress)
+                    if on_progress and "gen_rows" in seen and len(buf) - last_len >= 1200:
+                        last_len = len(buf)
+                        on_progress(f"正在生成结果…（{len(buf)} 字）")
                 return strip_model_noise("".join(parts))
             msg = resp.choices[0].message
             return strip_model_noise(msg.content or "")
@@ -638,7 +684,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                             f"{chunk}"
                         ),
                     }]
-                    raw = _complete(client, cfg["model"], piece_msgs)
+                    raw = _complete(client, cfg["model"], piece_msgs, on_progress=on_progress)
                     note, rows = _split_chat_reply(raw, columns)
                     chunk_results.append((note, rows or []))
                 raw_rows = [r for _, rs in chunk_results for r in rs]
@@ -662,7 +708,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     client = _client(cfg)
     if on_progress:
         on_progress("正在调用模型识别…")
-    raw = _complete(client, cfg["model"], msgs)
+    raw = _complete(client, cfg["model"], msgs, on_progress=on_progress)
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []

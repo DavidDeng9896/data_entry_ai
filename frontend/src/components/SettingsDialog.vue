@@ -24,6 +24,12 @@
 
           <div class="model-block">
             <div class="block-title">文本模型 <span class="hint">用于 Excel / CSV / PDF 文本类文件</span></div>
+            <div class="preset-row">
+              <span class="preset-label">快捷预设</span>
+              <button type="button" class="btn ghost mini" @click="applyPreset('text_model', 'minimax')">MiniMax</button>
+              <button type="button" class="btn ghost mini" @click="applyPreset('text_model', 'dashscope')">阿里云百炼 Qwen</button>
+              <button type="button" class="btn ghost mini" @click="applyPreset('text_model', 'openai')">OpenAI</button>
+            </div>
             <div class="form-row"><label>Base URL</label><input v-model="settings.text_model.base_url" class="inp" placeholder="https://api.openai.com/v1" /></div>
             <div class="form-row"><label>API Key</label><input v-model="settings.text_model.api_key" class="inp" type="password" placeholder="sk-..." /></div>
             <div class="form-row"><label>模型名</label><input v-model="settings.text_model.model" class="inp" placeholder="gpt-4o-mini" /></div>
@@ -33,6 +39,12 @@
 
           <div class="model-block">
             <div class="block-title">视觉模型 <span class="hint">用于图片扫描件表格识别</span></div>
+            <div class="preset-row">
+              <span class="preset-label">快捷预设</span>
+              <button type="button" class="btn ghost mini" @click="applyPreset('vision_model', 'minimax')">MiniMax</button>
+              <button type="button" class="btn ghost mini" @click="applyPreset('vision_model', 'dashscope')">阿里云百炼 Qwen</button>
+              <button type="button" class="btn ghost mini" @click="applyPreset('vision_model', 'openai')">OpenAI</button>
+            </div>
             <div class="form-row"><label>Base URL</label><input v-model="settings.vision_model.base_url" class="inp" placeholder="https://api.openai.com/v1" /></div>
             <div class="form-row"><label>API Key</label><input v-model="settings.vision_model.api_key" class="inp" type="password" placeholder="sk-..." /></div>
             <div class="form-row"><label>模型名</label><input v-model="settings.vision_model.model" class="inp" placeholder="gpt-4o" /></div>
@@ -104,6 +116,21 @@ const currentName = ref('')
 const currentEnabled = ref(false)
 const content = ref('')
 const mdInput = ref(null)
+
+const PRESETS = {
+  minimax: { base_url: 'https://api.minimaxi.com/v1', model: 'MiniMax-M2.7-highspeed' },
+  dashscope: { base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3.6-flash' },
+  openai: { base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' }
+}
+
+function applyPreset(which, name) {
+  const p = PRESETS[name]
+  if (!p || !settings.value[which]) return
+  settings.value[which].base_url = p.base_url
+  settings.value[which].model = p.model
+  saveTip.value = `已填入 ${name === 'dashscope' ? '阿里云百炼' : name} 地址和模型名，请填对应 API Key 后保存`
+  setTimeout(() => { if (saveTip.value.startsWith('已填入')) saveTip.value = '' }, 4000)
+}
 
 onMounted(async () => {
   settings.value = await api.getSettings()
@@ -224,6 +251,8 @@ async function toggleEnable() {
 .model-block { border: 1px solid #f0f0f0; border-radius: 6px; padding: 14px 16px; margin-bottom: 14px; }
 .block-title { font-weight: 600; margin-bottom: 12px; color: #1a1a1a; }
 .hint { font-weight: 400; color: #999; font-size: 12px; margin-left: 8px; }
+.preset-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.preset-label { font-size: 12px; color: #888; }
 .form-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .form-row label { width: 80px; color: #666; font-size: 13px; }
 .inp { flex: 1; border: 1px solid #e5e5e5; border-radius: 4px; padding: 6px 10px; font-size: 13px; }

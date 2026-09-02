@@ -152,6 +152,14 @@ def resolve_skill(
         return _pack(None, auto=False, reason="指定的 Skill 不存在，改用基线")
     if not auto_skill:
         return _pack(None, auto=False, reason="用户选择仅基线")
+    picked = pick_by_rules(
+        skills,
+        table_name=table_name,
+        columns=columns,
+        file_content=file_content,
+    )
+    if picked:
+        return _pack(picked, auto=True, reason="自动匹配（规则打分）")
     if use_llm and llm_cfg and len(file_content or "") <= 24000:
         picked, reason = pick_by_llm(
             skills,
@@ -162,12 +170,4 @@ def resolve_skill(
         )
         if picked:
             return _pack(picked, auto=True, reason=reason or "自动匹配（模型）")
-    picked = pick_by_rules(
-        skills,
-        table_name=table_name,
-        columns=columns,
-        file_content=file_content,
-    )
-    if not picked:
-        return _pack(None, auto=True, reason="未匹配到 Skill，仅用基线")
-    return _pack(picked, auto=True, reason="自动匹配（规则打分）")
+    return _pack(None, auto=True, reason="未匹配到 Skill，仅用基线")

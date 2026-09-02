@@ -119,7 +119,7 @@
         <div class="chat-scroll" ref="chatMsgs" data-conversation-scroll>
           <div v-if="!chatLog.length && !chatThinking" class="chat-empty">
             <div class="chat-empty-title">描述规则或上传文件</div>
-            <div class="chat-empty-desc">点击左上角上传附件（可多选），或输入规则后发送识别。</div>
+            <div class="chat-empty-desc">点下方回形针上传附件（可多选），或输入规则后发送识别。</div>
           </div>
 
           <article
@@ -129,20 +129,26 @@
           >
             <div class="turn-label">{{ m.role === 'user' ? '你' : '助手' }}</div>
             <div class="turn-body">
-              <ul v-if="m.streaming && m.steps?.length" class="progress-steps">
+              <ul v-if="m.steps?.length && (m.streaming || m.localOnly)" class="progress-steps">
                 <li
                   v-for="(s, si) in m.steps"
                   :key="si"
                   :class="{ done: s.done, current: !s.done && si === m.steps.length - 1 }"
                 >
                   <i :class="s.done ? 'ri-checkbox-circle-fill' : 'ri-loader-4-line spin'"></i>
-                  <span>{{ s.text }}</span>
+                  <span>{{ s.text }}<span v-if="!s.done && s.waitHint" class="step-wait"> · {{ s.waitHint }}</span></span>
                 </li>
               </ul>
-              <template v-else-if="m.fileChip">
+              <ul v-else-if="m.streaming" class="progress-steps">
+                <li class="current">
+                  <i class="ri-loader-4-line spin"></i>
+                  <span>正在连接服务…</span>
+                </li>
+              </ul>
+              <template v-if="m.fileChip">
                 <span class="turn-file"><i class="ri-file-text-line"></i>{{ m.content }}</span>
               </template>
-              <template v-else>{{ m.content }}</template>
+              <template v-else-if="m.content">{{ m.content }}</template>
             </div>
             <div v-if="m.pending" class="turn-meta">已排队，等待当前轮结束</div>
           </article>
@@ -165,7 +171,31 @@
         </div>
 
         <div class="composer">
-          <div class="composer-attach-row">
+          <div v-if="chatAttachments.length" class="composer-chips">
+            <span
+              v-for="att in chatAttachments"
+              :key="att.localId"
+              class="file-chip"
+              :class="{ uploading: att.uploading, error: att.error }"
+              :title="att.error || att.name"
+            >
+              <i v-if="att.uploading" class="ri-loader-4-line spin"></i>
+              <i v-else-if="att.error" class="ri-error-warning-line"></i>
+              <i v-else class="ri-file-text-line"></i>
+              <span class="file-chip-name">{{ att.name }}</span>
+              <button type="button" class="chip-x" @click="removeAttachment(att.localId)" title="移除">
+                <i class="ri-close-line"></i>
+              </button>
+            </span>
+          </div>
+          <textarea
+            v-model="chatInput"
+            class="composer-input"
+            rows="2"
+            :placeholder="composerPlaceholder"
+            @keydown="onComposerKeydown"
+          />
+          <div class="composer-toolbar">
             <label class="upload-btn" title="上传一个或多个附件">
               <input
                 type="file"
@@ -175,35 +205,8 @@
                 accept=".xlsx,.xls,.csv,.tsv,.pdf,.png,.jpg,.jpeg,.txt,.md"
                 @change="onFileChange"
               />
-              <i class="ri-upload-cloud-2-line"></i>
-              <span>上传附件</span>
+              <i class="ri-attachment-2"></i>
             </label>
-            <div v-if="chatAttachments.length" class="composer-chips">
-              <span
-                v-for="att in chatAttachments"
-                :key="att.localId"
-                class="file-chip"
-                :class="{ uploading: att.uploading, error: att.error }"
-                :title="att.error || att.name"
-              >
-                <i v-if="att.uploading" class="ri-loader-4-line spin"></i>
-                <i v-else-if="att.error" class="ri-error-warning-line"></i>
-                <i v-else class="ri-file-text-line"></i>
-                <span class="file-chip-name">{{ att.name }}</span>
-                <button type="button" class="chip-x" @click="removeAttachment(att.localId)" title="移除">
-                  <i class="ri-close-line"></i>
-                </button>
-              </span>
-            </div>
-          </div>
-          <textarea
-            v-model="chatInput"
-            class="composer-input"
-            rows="3"
-            :placeholder="composerPlaceholder"
-            @keydown="onComposerKeydown"
-          />
-          <div class="composer-toolbar">
             <label class="skill-picker" title="导入 Skill 模板">
               <i class="ri-book-2-line"></i>
               <select v-model="pickedSkill" class="skill-select">
@@ -213,36 +216,16 @@
               </select>
               <i class="ri-arrow-down-s-line skill-caret"></i>
             </label>
-            <div class="composer-actions">
-              <button
-                v-if="chatThinking"
-                type="button"
-                class="btn steer"
-                title="停止当前识别"
-                @click="abortTurn"
-              >
-                <span>停止</span>
-              </button>
-              <button
-                v-if="chatThinking && canSteer"
-                type="button"
-                class="btn steer"
-                title="打断并按新指令重导"
-                @click="steerNow"
-              >
-                <i class="ri-skip-forward-line"></i>
-                <span>立即重导</span>
-              </button>
-              <button
-                type="button"
-                class="btn send"
-                :title="chatThinking ? '排队' : '发送'"
-                @click="sendOrQueue"
-                :disabled="!canSubmit"
-              >
-                <i class="ri-arrow-up-line"></i>
-              </button>
-            </div>
+            <button
+              type="button"
+              class="btn send"
+              :class="primaryAction.kind"
+              :title="primaryAction.title"
+              :disabled="primaryAction.disabled"
+              @click="onPrimaryAction"
+            >
+              <i :class="primaryAction.icon"></i>
+            </button>
           </div>
         </div>
       </aside>
@@ -345,15 +328,31 @@ const hasReadyFiles = computed(() => readyFileIds.value.length > 0)
 const isUploadingFiles = computed(() => chatAttachments.value.some(a => a.uploading))
 const canSubmit = computed(() => {
   if (isUploadingFiles.value) return false
-  return chatThinking.value ? hasDraft.value : !!(hasDraft.value || hasReadyFiles.value)
+  return !!(hasDraft.value || hasReadyFiles.value)
 })
 const canSteer = computed(() => !!(hasDraft.value || hasReadyFiles.value || chatQueue.value.length))
+const primaryAction = computed(() => {
+  if (isUploadingFiles.value) {
+    return { kind: 'wait', icon: 'ri-loader-4-line spin', title: '上传中', disabled: true }
+  }
+  if (!chatThinking.value) {
+    return {
+      kind: 'send',
+      icon: 'ri-arrow-up-line',
+      title: '发送',
+      disabled: !canSubmit.value
+    }
+  }
+  if (hasDraft.value) {
+    return { kind: 'steer', icon: 'ri-arrow-up-line', title: '立即重导', disabled: false }
+  }
+  return { kind: 'stop', icon: 'ri-stop-mini-fill', title: '停止', disabled: false }
+})
 const thinkingLabel = computed(() => (streamIntent.value === 'chat' ? '思考中' : '识别中'))
 const composerPlaceholder = computed(() => {
+  if (isUploadingFiles.value) return '正在上传附件…'
   if (chatThinking.value) {
-    return streamIntent.value === 'chat'
-      ? '思考中… Enter 排队'
-      : '识别中… Enter 排队，或点「立即重导」打断'
+    return hasDraft.value ? '发送即打断并按新指令重导' : '识别中，点方块停止'
   }
   if (hasReadyFiles.value) return '可补充要求后发送；空发送会识别附件，追问则只聊天'
   return '上传附件或描述规则，Enter 发送，Shift+Enter 换行'
@@ -585,16 +584,33 @@ async function onFileChange(e) {
   const files = Array.from(e.target.files || [])
   if (!files.length) return
   if (fileInput.value) fileInput.value.value = ''
-  for (const f of files) {
+  chatSessionStarted.value = true
+  const uploadTurn = {
+    role: 'assistant',
+    content: '',
+    steps: files.map(f => ({ text: `准备上传 ${f.name}`, done: false })),
+    streaming: true,
+    localOnly: true
+  }
+  chatLog.value.push(uploadTurn)
+  scrollChat()
+  let ok = 0
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i]
     const localId = `${Date.now()}-${Math.random()}`
     const item = { localId, name: f.name, fileId: null, uploading: true, error: null }
     chatAttachments.value.push(item)
+    uploadTurn.steps[i].text = `正在上传 ${f.name}`
+    scrollChat()
     try {
       const up = await api.upload(f)
       const idx = chatAttachments.value.findIndex(a => a.localId === localId)
       if (idx >= 0) {
         chatAttachments.value[idx] = { ...chatAttachments.value[idx], fileId: up.file_id, uploading: false }
       }
+      uploadTurn.steps[i].done = true
+      uploadTurn.steps[i].text = `已上传 ${f.name}`
+      ok += 1
     } catch (err) {
       const idx = chatAttachments.value.findIndex(a => a.localId === localId)
       if (idx >= 0) {
@@ -604,8 +620,16 @@ async function onFileChange(e) {
           error: err.message || '上传失败'
         }
       }
+      uploadTurn.steps[i].done = true
+      uploadTurn.steps[i].text = `上传失败 ${f.name}：${err.message || '未知错误'}`
     }
+    scrollChat()
   }
+  uploadTurn.streaming = false
+  uploadTurn.content = ok
+    ? `已上传 ${ok} 个附件，可补充要求后发送，或直接发送开始识别。`
+    : '附件上传失败，请重试。'
+  scrollChat()
 }
 
 function pushAttachmentBubbleIfNeeded() {
@@ -616,11 +640,33 @@ function pushAttachmentBubbleIfNeeded() {
   chatLog.value.push({ role: 'user', content: names.join('、'), fileChip: true })
 }
 
+function onPrimaryAction() {
+  if (primaryAction.value.kind === 'stop') {
+    abortTurn()
+    return
+  }
+  if (primaryAction.value.kind === 'steer') {
+    steerNow()
+    return
+  }
+  sendOrQueue()
+}
+
 function onComposerKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    sendOrQueue()
+    if (chatThinking.value && primaryAction.value.kind === 'stop') return
+    onPrimaryAction()
   }
+}
+
+function stepFamily(text) {
+  return String(text || '')
+    .replace(/（[^）]*）/g, '')
+    .replace(/·.*/, '')
+    .replace(/\d+\/\d+/g, '')
+    .replace(/\s+/g, '')
+    .slice(0, 12)
 }
 
 function enqueueDraft() {
@@ -707,13 +753,18 @@ async function runTurn() {
   streamIntent.value = 'recognize'
   startClock()
   scrollChat()
-  const assistant = { role: 'assistant', content: '', steps: [], streaming: true }
+  const assistant = {
+    role: 'assistant',
+    content: '',
+    steps: [{ text: '已发送，正在连接服务…', done: false }],
+    streaming: true
+  }
   chatLog.value.push(assistant)
   scrollChat()
   try {
     const res = await api.chatStream({
       messages: chatLog.value
-        .filter(m => !m.fileChip && !m.pending && !m.streaming && m.content)
+        .filter(m => !m.fileChip && !m.localOnly && !m.pending && !m.streaming && m.content)
         .map(m => ({ role: m.role, content: m.content })),
       columns: columns.value,
       ...skillPayload(),
@@ -725,8 +776,24 @@ async function runTurn() {
         if (myTurn !== turnSeq) return
         if (step.intent) streamIntent.value = step.intent
         const prev = assistant.steps[assistant.steps.length - 1]
+        if (prev && !prev.done && stepFamily(prev.text) === stepFamily(step.text)) {
+          prev.text = step.text
+          prev.waitHint = ''
+          scrollChat()
+          return
+        }
         if (prev) prev.done = true
         assistant.steps.push({ text: step.text, done: false })
+        scrollChat()
+      },
+      onPing: (ping) => {
+        if (myTurn !== turnSeq) return
+        const last = assistant.steps[assistant.steps.length - 1]
+        if (!last || last.done) return
+        last.pings = (last.pings || 0) + 1
+        if (last.pings < 2) return
+        const elapsed = ping?.elapsed ?? Math.floor((Date.now() - runStartedAt.value) / 1000)
+        last.waitHint = `已等待 ${elapsed}s`
         scrollChat()
       }
     })
@@ -991,6 +1058,7 @@ async function confirmImport() {
 .progress-steps li.current .ri { color: #2468DB; }
 .progress-steps li.done { color: #389e0d; }
 .progress-steps li.done .ri { color: #52c41a; }
+.step-wait { color: #8a8f98; font-size: 12px; }
 
 .queue-dock {
   border-top: 1px solid #eef0f2; background: #fff; flex-shrink: 0;
@@ -1010,41 +1078,41 @@ async function confirmImport() {
 
 .composer {
   margin: 10px 12px 12px; border: 1px solid #dfe3e8; border-radius: 14px;
-  background: #fff; padding: 10px 10px 8px; flex-shrink: 0;
+  background: #fff; padding: 8px 10px 8px; flex-shrink: 0;
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 .composer:focus-within { border-color: #b8ccf5; box-shadow: 0 0 0 3px rgba(36, 104, 219, 0.08); }
-.composer-attach-row {
-  display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap;
-  margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px dashed #e8eaed;
-}
 .upload-input { display: none; }
 .upload-btn {
-  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
-  height: 34px; padding: 0 12px; border-radius: 8px; cursor: pointer;
-  border: 1px solid #c5d8f7; background: #eef4fd; color: #2468DB;
-  font-size: 13px; font-weight: 500; transition: all 0.12s;
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+  border: 1px solid #e8eaed; background: #f7f8fa; color: #5f6b7a;
+  transition: all 0.12s;
 }
-.upload-btn:hover { background: #dfeafb; border-color: #9bb8ea; }
+.upload-btn:hover { background: #eef4fd; border-color: #c5d8f7; color: #2468DB; }
 .upload-btn .ri { font-size: 17px; }
-.composer-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.composer-chips {
+  display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto;
+  padding-bottom: 8px; margin-bottom: 2px;
+  scrollbar-width: thin;
+}
 .file-chip {
-  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
-  background: #f3f6fb; color: #2b4f8f; border: 1px solid #e3ebf7;
-  border-radius: 8px; padding: 4px 8px; font-size: 12px;
+  display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+  max-width: 148px; background: #f3f6fb; color: #2b4f8f; border: 1px solid #e3ebf7;
+  border-radius: 8px; padding: 3px 7px; font-size: 12px;
 }
 .file-chip.uploading { opacity: 0.85; border-style: dashed; }
 .file-chip.error { color: #cf1322; background: #fff1f0; border-color: #ffccc7; }
-.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 104px; }
 .chip-x { border: none; background: transparent; color: #5f7db8; cursor: pointer; display: inline-flex; padding: 0; }
 .composer-input {
   width: 100%; border: none; outline: none; resize: none; font-size: 13px; line-height: 1.6;
-  min-height: 72px; color: #1f2329; background: transparent;
+  min-height: 48px; max-height: 96px; color: #1f2329; background: transparent;
 }
 .composer-input::placeholder { color: #b0b6bf; }
 .composer-toolbar {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  margin-top: 8px; min-height: 34px;
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 6px; min-height: 32px;
 }
 .skill-picker {
   display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 1;
@@ -1058,19 +1126,17 @@ async function confirmImport() {
   flex: 1; min-width: 0; border: none; background: transparent; outline: none;
   font-size: 12px; color: #374151; cursor: pointer; appearance: none; padding-right: 2px;
 }
-.composer-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.btn.steer {
-  border: 1px solid #c5d8f7; color: #2468DB; background: #fff; border-radius: 8px;
-  padding: 0 10px; height: 32px; font-size: 12px; white-space: nowrap;
-}
-.btn.steer:hover { background: #eef4fd; }
 .btn.send {
-  width: 32px; height: 32px; padding: 0; justify-content: center;
+  width: 32px; height: 32px; padding: 0; justify-content: center; flex-shrink: 0;
   background: #2468DB; border: none; color: #fff; border-radius: 8px;
 }
 .btn.send:hover { background: #1d5bc4; }
 .btn.send:disabled { background: #b8ccf5; cursor: not-allowed; }
 .btn.send .ri { font-size: 16px; }
+.btn.send.stop { background: #1f2329; }
+.btn.send.stop:hover { background: #111; }
+.btn.send.steer { background: #2468DB; }
+.btn.send.wait { background: #b8ccf5; }
 
 .chat-handle {
   position: absolute; right: -14px; top: 72px; transform: translateX(100%);

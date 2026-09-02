@@ -3,7 +3,9 @@ import unittest
 from app.schemas import ColumnDef
 from app.services.ai_service import (
     compact_file_for_qa,
+    extra_body_for_model,
     friendly_llm_error,
+    report_stream_progress,
     split_file_chunks,
     strip_model_noise,
     _split_chat_reply,
@@ -53,6 +55,18 @@ class FriendlyLlmErrorTest(unittest.TestCase):
         self.assertIn("配额", msg)
         self.assertIn("429", msg)
 
+    def test_unsupported_qwen_on_wrong_gateway(self):
+        msg = friendly_llm_error(RuntimeError(
+            "Error code: 400 - {'success': False, 'message': '不支持的模型或无可用服务商: qwen3.6-flash', 'data': None}"
+        ))
+        self.assertIn("不提供这个模型", msg)
+        self.assertIn("百炼", msg)
+        self.assertNotIn("Error code: 400", msg)
+
+    def test_extra_body_only_for_minimax(self):
+        self.assertEqual(extra_body_for_model("MiniMax-M2.7-highspeed"), {"reasoning_split": True})
+        self.assertEqual(extra_body_for_model("qwen3.6-flash"), {})
+
 
 class MiniMaxThinkParseTest(unittest.TestCase):
     def test_strip_think_block(self):
@@ -73,6 +87,18 @@ class MiniMaxThinkParseTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["cpds_id"], "HW350003A")
         self.assertNotIn("<think>", note)
+
+
+class StreamProgressTest(unittest.TestCase):
+    def test_mapping_line_becomes_generating(self):
+        seen = set()
+        got = []
+        report_stream_progress("1. 已加载 Skill\n2. 解析 2 个附件\n3. 映射 10 列", seen, got.append)
+        self.assertEqual(got, ["正在抽取并生成结果…"])
+        report_stream_progress("3. 映射 10 列\n<<<ROWS>>>\n[{", seen, got.append)
+        self.assertEqual(got[-1], "正在生成结果…")
+        report_stream_progress("<<<ROWS>>>\n[{}]", seen, got.append)
+        self.assertEqual(got.count("正在生成结果…"), 1)
 
 
 if __name__ == "__main__":

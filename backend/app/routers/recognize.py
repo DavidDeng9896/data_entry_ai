@@ -34,33 +34,40 @@ def _parse_max_chars() -> int:
         return 0
 
 
+def _load_one_file_item(fid: str, max_chars: int) -> dict:
+    try:
+        label = file_parser.original_filename(fid)
+        if file_parser.is_image(fid):
+            text = f"### 文件: {label}\n（已上传图片，当前以文本模式处理）"
+            return {
+                "file_id": fid, "label": label, "text": text,
+                "chars": len(text), "truncated": False,
+            }
+        text = file_parser.parse_to_text(fid, max_chars=max_chars)
+        wrapped = f"### 文件: {label}\n{text}"
+        return {
+            "file_id": fid,
+            "label": label,
+            "text": wrapped,
+            "chars": len(text),
+            "truncated": "已截断" in text,
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+
+
 def _load_file_items(file_ids: list[str]) -> list[dict]:
-    items: list[dict] = []
     if not file_ids:
-        return items
+        return []
     max_chars = _parse_max_chars()
-    for fid in file_ids:
-        try:
-            label = file_parser.original_filename(fid)
-            if file_parser.is_image(fid):
-                text = f"### 文件: {label}\n（已上传图片，当前以文本模式处理）"
-                items.append({
-                    "file_id": fid, "label": label, "text": text,
-                    "chars": len(text), "truncated": False,
-                })
-                continue
-            text = file_parser.parse_to_text(fid, max_chars=max_chars)
-            wrapped = f"### 文件: {label}\n{text}"
-            items.append({
-                "file_id": fid,
-                "label": label,
-                "text": wrapped,
-                "chars": len(text),
-                "truncated": "已截断" in text,
-            })
-        except FileNotFoundError as e:
-            raise HTTPException(404, str(e)) from e
-    return items
+    return [_load_one_file_item(fid, max_chars) for fid in file_ids]
+
+
+def _file_label(fid: str) -> str:
+    try:
+        return file_parser.original_filename(fid)
+    except FileNotFoundError:
+        return fid
 
 
 def _load_files_content(file_ids: list[str]) -> tuple[str | None, dict]:
@@ -190,10 +197,12 @@ def _run_chat(req: ChatRequest) -> dict:
 
 async def _run_in_thread(fn, *args, **kwargs):
     task = asyncio.create_task(asyncio.to_thread(fn, *args, **kwargs))
+    started = asyncio.get_running_loop().time()
     while not task.done():
-        yield "ping", {}
+        elapsed = int(asyncio.get_running_loop().time() - started)
+        yield "ping", {"elapsed": elapsed}
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+            await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
         except asyncio.TimeoutError:
             continue
     yield "result", task.result()
@@ -239,27 +248,35 @@ async def _aiter_chat_events(req: ChatRequest):
         result = None
         async for kind, payload in _run_in_thread(_run_chat, req):
             if kind == "ping":
-                yield "ping", {}
+                yield "ping", payload
             else:
                 result = payload
         yield "done", {k: result[k] for k in ("reply", "rows", "intent", "skill_id", "skill_name", "skill_auto", "skill_reason")}
         return
 
-    yield "step", {"text": "正在读取附件（大 Excel 解析可能要一会儿）…", "intent": intent}
-    items = None
-    async for kind, payload in _run_in_thread(_load_file_items, file_ids):
-        if kind == "ping":
-            yield "ping", {}
-        else:
-            items = payload
-    items = items or []
+    n_files = len(file_ids)
+    items: list[dict] = []
+    if n_files:
+        yield "step", {"text": f"正在读取 {n_files} 个附件…", "intent": intent}
+        max_chars = _parse_max_chars()
+        for i, fid in enumerate(file_ids, 1):
+            label = _file_label(fid)
+            yield "step", {"text": f"正在解析附件 {i}/{n_files}：{label}"}
+            item = None
+            async for kind, payload in _run_in_thread(_load_one_file_item, fid, max_chars):
+                if kind == "ping":
+                    yield "ping", payload
+                else:
+                    item = payload
+            items.append(item)
     file_meta = {
         "count": len(items),
         "chars": sum(i["chars"] for i in items),
         "truncated": any(i["truncated"] for i in items),
     }
     n = len(items)
-    yield "step", {"text": f"读取 {n} 个附件，将逐个识别后合并", "intent": intent}
+    if n:
+        yield "step", {"text": f"读取 {n} 个附件，开始识别", "intent": intent}
 
     all_rows: list = []
     chunk_notes: list[tuple[str, list[dict]]] = []
@@ -268,15 +285,33 @@ async def _aiter_chat_events(req: ChatRequest):
         "skill_id": None, "skill_name": None, "skill_auto": True,
         "skill_reason": "", "skill_content": None,
     }
-    for i, item in enumerate(items, 1):
-        label = item.get("label") or item["file_id"]
-        yield "step", {"text": f"附件 {i}/{n}：{label}"}
-        resolved = await asyncio.to_thread(
-            lambda it=item: _resolve_for_request(req, it["text"], allow_auto=True)
-        )
+    if items:
+        yield "step", {"text": "正在匹配 Skill…"}
+        async for kind, payload in _run_in_thread(
+            _resolve_for_request, req, items[0]["text"], allow_auto=True
+        ):
+            if kind == "ping":
+                yield "ping", payload
+            else:
+                resolved = payload
         resolved_list.append(resolved)
-        skill_txt = resolved.get("skill_name") or "仅基线"
-        yield "step", {"text": f"附件 {i}/{n} 匹配 {skill_txt}（{item['chars']} 字）"}
+        yield "step", {"text": f"匹配 {resolved.get('skill_name') or '仅基线'}"}
+
+    async def _chat_one(item: dict):
+        return await asyncio.to_thread(
+            ai_service.chat,
+            req.messages,
+            req.columns,
+            resolved.get("skill_content"),
+            item["text"],
+            intent=intent,
+            file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
+            table_name=req.table_name or "",
+        )
+
+    if n == 1:
+        item = items[0]
+        label = item.get("label") or item["file_id"]
         reply, rows = None, None
         async for kind, payload in _run_chat_with_progress(
             req.messages,
@@ -288,18 +323,39 @@ async def _aiter_chat_events(req: ChatRequest):
             table_name=req.table_name or "",
         ):
             if kind == "ping":
-                yield "ping", {}
+                yield "ping", payload
             elif kind == "step":
                 yield "step", payload
             else:
                 reply, rows = payload
-        n_rows = len(rows or [])
-        yield "step", {"text": f"附件 {i}/{n} 抽出 {n_rows} 行"}
-        note = f"附件 {i}/{n}（{label}）"
+        yield "step", {"text": f"附件 1/1 抽出 {len(rows or [])} 行"}
+        note = f"附件 1/1（{label}）"
         if reply:
             note = f"{note}：{reply}"
         chunk_notes.append((note, rows or []))
         all_rows.extend(rows or [])
+    elif n > 1:
+        yield "step", {"text": f"正在并行识别 {n} 个附件…"}
+
+        async def _run_all():
+            return await asyncio.gather(*[_chat_one(it) for it in items])
+
+        task = asyncio.create_task(_run_all())
+        while not task.done():
+            yield "ping", {}
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+        pairs = task.result()
+        for i, (item, (reply, rows)) in enumerate(zip(items, pairs), 1):
+            label = item.get("label") or item["file_id"]
+            yield "step", {"text": f"附件 {i}/{n} 抽出 {len(rows or [])} 行"}
+            note = f"附件 {i}/{n}（{label}）"
+            if reply:
+                note = f"{note}：{reply}"
+            chunk_notes.append((note, rows or []))
+            all_rows.extend(rows or [])
 
     if not items:
         yield "step", {"text": "未指定模板，仅用基线", "intent": intent}
@@ -308,7 +364,7 @@ async def _aiter_chat_events(req: ChatRequest):
             intent=intent, file_meta=file_meta, table_name=req.table_name or "",
         ):
             if kind == "ping":
-                yield "ping", {}
+                yield "ping", payload
             else:
                 chunk_notes.append((payload[0], payload[1] or []))
                 all_rows.extend(payload[1] or [])
@@ -323,7 +379,7 @@ async def _aiter_chat_events(req: ChatRequest):
             names.append(nme)
     meta = _skill_meta_payload(resolved)
     if n > 1:
-        meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
+        meta["skill_reason"] = "同一结果表共用 Skill 后并行识别并合并"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     yield "done", {
         "reply": compose_extraction_reply(
@@ -386,13 +442,19 @@ def chat(req: ChatRequest):
         raise HTTPException(500, friendly_llm_error(e))
 
 
+_SSE_PADDING = ":" + (" " * 2048) + "\n\n"
+
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     async def gen():
+        yield _SSE_PADDING
+        yield _sse("step", {"text": "已连接，开始处理…"})
         try:
             async for event, payload in _aiter_chat_events(req):
                 if event == "ping":
                     yield ": keepalive\n\n"
+                    yield _sse("ping", payload or {})
                     continue
                 yield _sse(event, payload)
                 if event == "step":
