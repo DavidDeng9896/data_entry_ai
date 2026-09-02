@@ -3,6 +3,7 @@ import unittest
 from app.schemas import ColumnDef
 from app.services.ai_service import (
     compact_file_for_qa,
+    extra_body_for_model,
     friendly_llm_error,
     split_file_chunks,
     strip_model_noise,
@@ -52,6 +53,18 @@ class FriendlyLlmErrorTest(unittest.TestCase):
         msg = friendly_llm_error(RuntimeError("Error code: 429 - 已达到 Token Plan 用量上限"))
         self.assertIn("配额", msg)
         self.assertIn("429", msg)
+
+    def test_unsupported_qwen_on_wrong_gateway(self):
+        msg = friendly_llm_error(RuntimeError(
+            "Error code: 400 - {'success': False, 'message': '不支持的模型或无可用服务商: qwen3.6-flash', 'data': None}"
+        ))
+        self.assertIn("不提供这个模型", msg)
+        self.assertIn("百炼", msg)
+        self.assertNotIn("Error code: 400", msg)
+
+    def test_extra_body_only_for_minimax(self):
+        self.assertEqual(extra_body_for_model("MiniMax-M2.7-highspeed"), {"reasoning_split": True})
+        self.assertEqual(extra_body_for_model("qwen3.6-flash"), {})
 
 
 class MiniMaxThinkParseTest(unittest.TestCase):
