@@ -343,7 +343,7 @@ const primaryAction = computed(() => {
       disabled: !canSubmit.value
     }
   }
-  if (hasDraft.value || hasReadyFiles.value) {
+  if (hasDraft.value) {
     return { kind: 'steer', icon: 'ri-arrow-up-line', title: '立即重导', disabled: false }
   }
   return { kind: 'stop', icon: 'ri-stop-mini-fill', title: '停止', disabled: false }
@@ -352,9 +352,7 @@ const thinkingLabel = computed(() => (streamIntent.value === 'chat' ? '思考中
 const composerPlaceholder = computed(() => {
   if (isUploadingFiles.value) return '正在上传附件…'
   if (chatThinking.value) {
-    return hasDraft.value || hasReadyFiles.value
-      ? '输入后点发送即打断重导'
-      : '识别中，点方块停止'
+    return hasDraft.value ? '发送即打断并按新指令重导' : '识别中，点方块停止'
   }
   if (hasReadyFiles.value) return '可补充要求后发送；空发送会识别附件，追问则只聊天'
   return '上传附件或描述规则，Enter 发送，Shift+Enter 换行'
