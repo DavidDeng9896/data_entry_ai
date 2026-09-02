@@ -129,7 +129,7 @@
           >
             <div class="turn-label">{{ m.role === 'user' ? '你' : '助手' }}</div>
             <div class="turn-body">
-              <ul v-if="m.streaming && m.steps?.length" class="progress-steps">
+              <ul v-if="m.steps?.length && (m.streaming || m.localOnly)" class="progress-steps">
                 <li
                   v-for="(s, si) in m.steps"
                   :key="si"
@@ -145,10 +145,10 @@
                   <span>正在连接服务…</span>
                 </li>
               </ul>
-              <template v-else-if="m.fileChip">
+              <template v-if="m.fileChip">
                 <span class="turn-file"><i class="ri-file-text-line"></i>{{ m.content }}</span>
               </template>
-              <template v-else>{{ m.content }}</template>
+              <template v-else-if="m.content">{{ m.content }}</template>
             </div>
             <div v-if="m.pending" class="turn-meta">已排队，等待当前轮结束</div>
           </article>
@@ -637,6 +637,7 @@ async function onFileChange(e) {
   uploadTurn.content = ok
     ? `已上传 ${ok} 个附件，可补充要求后发送，或直接发送开始识别。`
     : '附件上传失败，请重试。'
+  scrollChat()
 }
 
 function pushAttachmentBubbleIfNeeded() {
