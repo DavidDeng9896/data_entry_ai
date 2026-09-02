@@ -35,6 +35,26 @@ def _parse_max_chars() -> int:
         return 0
 
 
+def _file_label(fid: str) -> str:
+    try:
+        return file_parser.original_filename(fid)
+    except FileNotFoundError:
+        return fid
+
+
+def _short_parse_error(exc: BaseException) -> str:
+    if isinstance(exc, file_parser.FileParseError):
+        return str(exc)
+    raw = str(exc)
+    markers = (
+        "zip file", "BOF record", "无法解析 Excel",
+        "Unsupported format", "Cannot detect file format",
+    )
+    if any(s in raw for s in markers):
+        return "不是有效的 Excel 文件（可能加密、网盘封装或已损坏）。请另存为 xlsx 后再传。"
+    return raw[:240]
+
+
 def _load_one_file_item(fid: str, max_chars: int) -> dict:
     try:
         label = file_parser.original_filename(fid)
@@ -57,22 +77,43 @@ def _load_one_file_item(fid: str, max_chars: int) -> dict:
         raise HTTPException(404, str(e)) from e
 
 
-def _load_file_items(file_ids: list[str]) -> list[dict]:
-    if not file_ids:
-        return []
-    max_chars = _parse_max_chars()
-    return [_load_one_file_item(fid, max_chars) for fid in file_ids]
-
-
-def _file_label(fid: str) -> str:
+def _try_load_one_file_item(fid: str, max_chars: int) -> tuple[dict | None, str | None]:
+    """解析失败时跳过该附件，不把整批对话打成失败。"""
     try:
-        return file_parser.original_filename(fid)
-    except FileNotFoundError:
-        return fid
+        return _load_one_file_item(fid, max_chars), None
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None, f"{_file_label(fid)}：文件不存在"
+        raise
+    except Exception as exc:
+        return None, f"{_file_label(fid)}：{_short_parse_error(exc)}"
+
+
+def _with_skip_notes(reply: str, skipped: list[str]) -> str:
+    if not skipped:
+        return reply
+    block = "已跳过无法解析的附件：\n" + "\n".join(f"- {s}" for s in skipped)
+    reply = (reply or "").strip()
+    return f"{block}\n\n{reply}" if reply else block
+
+
+def _load_file_items(file_ids: list[str]) -> tuple[list[dict], list[str]]:
+    if not file_ids:
+        return [], []
+    max_chars = _parse_max_chars()
+    items: list[dict] = []
+    skipped: list[str] = []
+    for fid in file_ids:
+        item, err = _try_load_one_file_item(fid, max_chars)
+        if err:
+            skipped.append(err)
+        elif item:
+            items.append(item)
+    return items, skipped
 
 
 def _load_files_content(file_ids: list[str]) -> tuple[str | None, dict]:
-    items = _load_file_items(file_ids)
+    items, _skipped = _load_file_items(file_ids)
     meta = {
         "count": len(file_ids),
         "chars": sum(i["chars"] for i in items),
@@ -186,7 +227,7 @@ def _run_chat(req: ChatRequest) -> dict:
             **_skill_meta_payload(resolved),
         }
 
-    items = _load_file_items(file_ids)
+    items, skipped = _load_file_items(file_ids)
     file_meta = {
         "count": len(items),
         "chars": sum(i["chars"] for i in items),
@@ -194,6 +235,8 @@ def _run_chat(req: ChatRequest) -> dict:
     }
 
     if not items:
+        if skipped:
+            raise HTTPException(400, "全部附件都无法解析：\n" + "\n".join(skipped))
         resolved = _resolve_for_request(req, "", allow_auto=True)
         reply, rows = ai_service.chat(
             req.messages, req.columns, resolved.get("skill_content"), None,
@@ -234,8 +277,11 @@ def _run_chat(req: ChatRequest) -> dict:
     raw_n = len(all_rows)
     all_rows, conflicts = merge_extracted_rows(all_rows, key_field="cpds_id")
     return {
-        "reply": compose_extraction_reply(
-            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+        "reply": _with_skip_notes(
+            compose_extraction_reply(
+                chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+            ),
+            skipped,
         ),
         "rows": all_rows,
         "intent": intent,
@@ -304,19 +350,25 @@ async def _aiter_chat_events(req: ChatRequest):
 
     n_files = len(file_ids)
     items: list[dict] = []
+    skipped: list[str] = []
     if n_files:
         yield "step", {"text": f"正在读取 {n_files} 个附件…", "intent": intent}
         max_chars = _parse_max_chars()
         for i, fid in enumerate(file_ids, 1):
             label = _file_label(fid)
             yield "step", {"text": f"正在解析附件 {i}/{n_files}：{label}"}
-            item = None
-            async for kind, payload in _run_in_thread(_load_one_file_item, fid, max_chars):
+            loaded = None
+            async for kind, payload in _run_in_thread(_try_load_one_file_item, fid, max_chars):
                 if kind == "ping":
                     yield "ping", payload
                 else:
-                    item = payload
-            items.append(item)
+                    loaded = payload
+            item, err = loaded if loaded is not None else (None, f"{label}：解析失败")
+            if err:
+                skipped.append(err)
+                yield "step", {"text": f"已跳过 {label}：{err.split('：', 1)[-1]}"}
+            elif item:
+                items.append(item)
     file_meta = {
         "count": len(items),
         "chars": sum(i["chars"] for i in items),
@@ -406,6 +458,9 @@ async def _aiter_chat_events(req: ChatRequest):
             all_rows.extend(rows or [])
 
     if not items:
+        if skipped:
+            yield "error", {"message": "全部附件都无法解析：\n" + "\n".join(skipped)}
+            return
         yield "step", {"text": "未指定模板，仅用基线", "intent": intent}
         async for kind, payload in _run_in_thread(
             ai_service.chat, req.messages, req.columns, None, None,
@@ -430,8 +485,11 @@ async def _aiter_chat_events(req: ChatRequest):
         meta["skill_reason"] = "同一结果表共用 Skill 后并行识别并合并"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     yield "done", {
-        "reply": compose_extraction_reply(
-            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+        "reply": _with_skip_notes(
+            compose_extraction_reply(
+                chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+            ),
+            skipped,
         ),
         "rows": all_rows,
         "intent": intent,
@@ -448,7 +506,11 @@ async def upload(file: UploadFile):
     content = await file.read()
     if not content:
         raise HTTPException(400, "文件为空")
-    info = file_parser.save_upload(file.filename or "unnamed", content)
+    name = file.filename or "unnamed"
+    reason = file_parser.spreadsheet_reject_reason(name, content)
+    if reason:
+        raise HTTPException(400, f"{name}：{reason}")
+    info = file_parser.save_upload(name, content)
     return {"file_id": info["file_id"], "filename": info["filename"], "ext": info["ext"]}
 
 
@@ -486,6 +548,8 @@ def chat(req: ChatRequest):
         result = _run_chat(req)
         result.pop("file_meta", None)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, friendly_llm_error(e))
 

@@ -71,5 +71,35 @@ class ExcelFallbackTest(unittest.TestCase):
         self.assertTrue(sheets)
 
 
+TSD_BYTES = b"%TSD-Header-###%\x00not-excel"
+
+
+class FakeExcelRejectTest(unittest.TestCase):
+    def test_tsd_wrapper_raises_short_chinese(self):
+        info = file_parser.save_upload("enc.xlsx", TSD_BYTES)
+        self.addCleanup(lambda: Path(info["path"]).unlink(missing_ok=True))
+        with self.assertRaises(ValueError) as ctx:
+            file_parser.parse_to_text(info["file_id"])
+        msg = str(ctx.exception)
+        self.assertIn("TSD", msg)
+        self.assertNotIn("File is not a zip file", msg)
+        self.assertNotIn("Expected BOF record", msg)
+        self.assertLess(len(msg), 200)
+
+    def test_upload_rejects_tsd_xlsx(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        client = TestClient(app)
+        res = client.post(
+            "/api/recognize/upload",
+            files={"file": ("enc.xlsx", TSD_BYTES, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+        self.assertEqual(res.status_code, 400)
+        detail = res.json().get("detail") or ""
+        self.assertIn("TSD", detail)
+        self.assertNotIn("File is not a zip file", detail)
+
+
 if __name__ == "__main__":
     unittest.main()

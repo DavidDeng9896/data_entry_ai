@@ -18,6 +18,36 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif"}
 EXCEL_EXTS = {".xlsx", ".xls", ".xlsm", ".csv", ".tsv"}
+SPREADSHEET_EXTS = {".xlsx", ".xls", ".xlsm"}
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
+class FileParseError(ValueError):
+    """内容不是声称的格式，给用户看短中文原因。"""
+
+
+def spreadsheet_reject_reason(filename: str, data: bytes) -> str | None:
+    """扩展名是 Excel 但魔数对不上时返回短中文原因，否则 None。"""
+    ext = Path(filename or "").suffix.lower()
+    if ext not in SPREADSHEET_EXTS:
+        return None
+    if not data:
+        return "文件为空"
+    head = data[:80]
+    if head.startswith(b"PK") or head.startswith(_OLE_MAGIC):
+        return None
+    if head.startswith(b"%TSD-Header") or b"%TSD-Header" in data[:256]:
+        return (
+            "文件被加密或网盘封装（TSD），不是真正的 Excel。"
+            "请用 Excel 打开后「另存为 .xlsx」再上传。"
+        )
+    sample = data[:1024].lstrip().lower()
+    if sample.startswith(b"<") or b"<html" in sample:
+        return "文件实际是 HTML 网页，不是 Excel。请另存为 xlsx 后再传。"
+    return (
+        "扩展名是 Excel，但内容不是有效的 xlsx/xls。"
+        "常见原因：加密、网盘封装、下载损坏。请另存为 xlsx 后再传。"
+    )
 
 
 def save_upload(filename: str, content: bytes) -> dict:
@@ -264,7 +294,9 @@ def _read_excel_sheets(path: Path) -> dict:
         errors.append("openpyxl-readonly: empty")
     except Exception as e:
         errors.append(f"openpyxl-readonly: {e}")
-    raise ValueError("无法解析 Excel：" + " | ".join(errors)[:600])
+    raise FileParseError(
+        "不是有效的 Excel 文件（可能加密、网盘封装或已损坏）。请另存为 xlsx 后再传。"
+    )
 
 
 def _parse_excel(path: Path) -> str:
@@ -275,6 +307,9 @@ def _parse_excel(path: Path) -> str:
         df = pd.read_csv(path, sep=sep, engine="python", dtype=str, header=None)
         parts.append(_df_to_markdown(df))
     else:
+        reason = spreadsheet_reject_reason(path.name, path.read_bytes())
+        if reason:
+            raise FileParseError(reason)
         try:
             sheets = _read_excel_displayed(path)
         except Exception:

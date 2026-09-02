@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 
 os.environ["DATA_ENTRY_FORCE_MOCK"] = "1"
 
@@ -117,3 +118,33 @@ class ChatStreamApiTest(unittest.TestCase):
         self.assertIn("0.20", body)
         self.assertIn("没有重新识别", body)
         self.assertNotIn("CHO01", body)
+
+    def test_stream_skips_fake_xlsx_and_keeps_good_file(self):
+        from app.services import file_parser
+
+        client = TestClient(app)
+        up = client.post(
+            "/api/recognize/upload",
+            files={"file": ("tiny.csv", b"cpds_id,v\nA,1\n", "text/csv")},
+        )
+        self.assertEqual(up.status_code, 200)
+        good_id = up.json()["file_id"]
+        bad = file_parser.save_upload("enc.xlsx", b"%TSD-Header-###%\x00not-excel")
+        self.addCleanup(lambda: Path(bad["path"]).unlink(missing_ok=True))
+        with client.stream(
+            "POST",
+            "/api/recognize/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": "请识别"}],
+                "columns": [{"field": "cpds_id", "title": "ID", "type": "text"}],
+                "file_ids": [good_id, bad["file_id"]],
+                "auto_skill": True,
+            },
+        ) as res:
+            self.assertEqual(res.status_code, 200)
+            body = "".join(res.iter_text())
+        self.assertIn("event: done", body)
+        self.assertNotIn("event: error", body)
+        self.assertIn("已跳过", body)
+        self.assertIn("enc.xlsx", body)
+        self.assertNotIn("File is not a zip file", body)
