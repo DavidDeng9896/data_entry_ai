@@ -3,14 +3,18 @@
     <div class="workspace" :class="{ 'with-chat': chatOpen }">
       <div class="dialog">
         <div class="panel-header">
-          <span class="title">新建结果表</span>
-          <span class="sub">一次配置表名称与全部列</span>
-          <button v-if="!chatOpen" class="btn ai-btn" type="button" @click="openChat">
-            <i class="ri-sparkling-2-line"></i> AI 助手
-            <span v-if="chatThinking" class="pulse-dot" title="助手仍在执行"></span>
-            <span v-else-if="unreadDone" class="badge-dot" title="有新的结构"></span>
-          </button>
-          <span class="close-btn" @click="$emit('close')"><i class="ri-close-line"></i></span>
+          <div class="header-left">
+            <span class="title">新建结果表</span>
+            <span class="sub">一次配置表名称与全部列</span>
+          </div>
+          <div class="header-right">
+            <button v-if="!chatOpen" class="btn ai-btn" type="button" @click="openChat">
+              <i class="ri-sparkling-2-line"></i> AI 助手
+              <span v-if="chatThinking" class="pulse-dot" title="助手仍在执行"></span>
+              <span v-else-if="unreadDone" class="badge-dot" title="有新的结构"></span>
+            </button>
+            <span class="close-btn" @click="$emit('close')"><i class="ri-close-line"></i></span>
+          </div>
         </div>
 
         <div class="panel-body">
@@ -84,10 +88,22 @@
           </template>
 
           <div v-else class="skill-draft">
+            <div class="skill-mode">
+              <label>创建时如何处理 Skill</label>
+              <div class="mode-row">
+                <label class="mode-opt"><input type="radio" value="skip" v-model="skillMode" /> 不保存</label>
+                <label class="mode-opt"><input type="radio" value="new" v-model="skillMode" /> 另存为新 Skill</label>
+                <label class="mode-opt"><input type="radio" value="merge" v-model="skillMode" /> 合并到已有 Skill</label>
+              </div>
+              <select v-if="skillMode === 'merge'" v-model="mergeTargetId" class="inp merge-select">
+                <option value="">选择目标 Skill…</option>
+                <option v-for="s in skills" :key="s.id" :value="String(s.id)">{{ s.name }}</option>
+              </select>
+            </div>
             <label>Skill 名称</label>
-            <input v-model="skillName" class="inp" placeholder="如：PK · 某 CRO 版式" />
+            <input v-model="skillName" class="inp" placeholder="如：PK · 某 CRO 版式" :disabled="skillMode === 'skip'" />
             <label>Markdown</label>
-            <textarea v-model="skillMd" class="md-editor" placeholder="# 模板名称&#10;&#10;匹配线索、主源、字段映射、不映射、特殊值…"></textarea>
+            <textarea v-model="skillMd" class="md-editor" :disabled="skillMode === 'skip'" placeholder="# 模板名称&#10;&#10;匹配线索、主源、字段映射、不映射、特殊值…"></textarea>
           </div>
         </div>
 
@@ -239,6 +255,9 @@ const leftTab = ref('columns')
 const skillName = ref('')
 const skillMd = ref('')
 const skillDirty = ref(false)
+const skillMode = ref('new')
+const mergeTargetId = ref('')
+const skills = ref([])
 
 const chatOpen = ref(false)
 const chatSessionStarted = ref(false)
@@ -292,6 +311,7 @@ const composerPlaceholder = computed(() => {
 
 onMounted(async () => {
   tables.value = await api.listTables()
+  skills.value = await api.listSkills()
   addColumn()
 })
 
@@ -500,6 +520,7 @@ function applySchema(res) {
   if (res.skill_md) {
     skillMd.value = res.skill_md
     skillDirty.value = true
+    if (skillMode.value === 'skip') skillMode.value = 'new'
   }
   leftTab.value = 'columns'
   if (!chatOpen.value) unreadDone.value = true
@@ -597,19 +618,32 @@ async function create() {
   if (!cols.length) { error.value = '至少配置一列（字段名和显示名称都要填）'; return }
   const fields = cols.map(c => c.field.trim())
   if (new Set(fields).size !== fields.length) { error.value = '字段名不能重复'; return }
+  if (skillMode.value === 'new' && !skillMd.value.trim()) {
+    // 允许无草稿时跳过，等同不保存
+  }
+  if (skillMode.value === 'merge') {
+    if (!mergeTargetId.value) { error.value = '请选择要合并的目标 Skill'; leftTab.value = 'skill'; return }
+    if (!skillMd.value.trim()) { error.value = 'Skill 草稿为空，无法合并'; leftTab.value = 'skill'; return }
+  }
   try {
     const t = await api.createTable(name.value.trim(), description.value.trim(), cols)
-    if (skillMd.value.trim()) {
-      try {
+    try {
+      if (skillMode.value === 'new' && skillMd.value.trim()) {
         await api.saveSkill({
           name: (skillName.value || `${name.value.trim()} Skill`).trim(),
           content: skillMd.value
         })
-      } catch (e) {
-        error.value = `表已创建，但 Skill 未保存：${e.message}`
-        emit('created', t)
-        return
+      } else if (skillMode.value === 'merge') {
+        await api.mergeSkill({
+          target_id: Number(mergeTargetId.value),
+          draft_md: skillMd.value,
+          name: (skillName.value || '').trim()
+        })
       }
+    } catch (e) {
+      error.value = `表已创建，但 Skill 未保存：${e.message}`
+      emit('created', t)
+      return
     }
     emit('created', t)
     emit('close')
@@ -635,10 +669,15 @@ async function create() {
 }
 .workspace.with-chat .dialog { width: min(880px, calc(96vw - 420px)); }
 
-.panel-header { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0; }
+.panel-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 20px; border-bottom: 1px solid #f0f0f0; flex-shrink: 0;
+}
+.header-left { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.header-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
 .title { font-size: 16px; font-weight: 600; color: #1a1a1a; }
 .sub { color: #999; font-size: 12px; }
-.close-btn { margin-left: auto; cursor: pointer; color: #999; font-size: 18px; display: flex; align-self: center; }
+.close-btn { cursor: pointer; color: #999; font-size: 18px; display: flex; align-items: center; }
 .close-btn:hover { color: #333; }
 .panel-body { padding: 16px 20px; overflow: auto; flex: 1; min-height: 0; }
 
@@ -673,12 +712,20 @@ async function create() {
 
 .skill-draft { display: flex; flex-direction: column; gap: 8px; }
 .skill-draft label { font-size: 13px; color: #666; }
+.skill-mode {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; background: #f7f8fa; border-radius: 6px; margin-bottom: 4px;
+}
+.mode-row { display: flex; flex-wrap: wrap; gap: 12px 16px; }
+.mode-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #4a4a4a; cursor: pointer; }
+.merge-select { max-width: 420px; }
 .md-editor {
   width: 100%; min-height: 280px; border: 1px solid #e5e5e5; border-radius: 4px;
   padding: 10px; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   line-height: 1.55; resize: vertical;
 }
 .md-editor:focus { outline: none; border-color: #2468DB; }
+.md-editor:disabled, .inp:disabled { background: #f5f5f5; color: #999; }
 
 .panel-footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding: 12px 20px; border-top: 1px solid #f0f0f0; flex-shrink: 0; }
 .err { color: #e02b2b; font-size: 13px; margin-right: auto; }
@@ -688,7 +735,7 @@ async function create() {
 .btn.primary { background: #1c62d7; border-color: #1c62d7; color: #fff; }
 .btn.primary:hover { background: #2a6fe0; }
 .btn.ghost { color: #666; }
-.btn.ai-btn { border-color: #2468DB; color: #2468DB; background: #fff; margin-left: auto; }
+.btn.ai-btn { border-color: #2468DB; color: #2468DB; background: #fff; margin-left: 0; }
 .btn.ai-btn:hover { background: #eef4fd; }
 .pulse-dot, .badge-dot { width: 8px; height: 8px; border-radius: 50%; background: #2468DB; margin-left: 4px; }
 .pulse-dot { animation: pulse 1s ease-in-out infinite; }

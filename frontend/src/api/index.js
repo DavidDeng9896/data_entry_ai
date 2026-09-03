@@ -33,6 +33,7 @@ export const api = {
   listSkills: () => req('/skills'),
   getSkill: (id) => req(`/skills/${id}`),
   saveSkill: (payload) => req('/skills', { method: 'POST', body: JSON.stringify(payload) }),
+  mergeSkill: (payload) => req('/skills/merge', { method: 'POST', body: JSON.stringify(payload) }),
   deleteSkill: (id) => req(`/skills/${id}`, { method: 'DELETE' }),
   enableSkill: (id) => req('/skills/enable', { method: 'POST', body: JSON.stringify({ id: id ?? null }) }),
   importSkillMd: (file) => {
