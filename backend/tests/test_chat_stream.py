@@ -119,6 +119,33 @@ class ChatStreamApiTest(unittest.TestCase):
         self.assertIn("没有重新识别", body)
         self.assertNotIn("CHO01", body)
 
+    def test_stream_analyze_with_empty_table_parses_files(self):
+        client = TestClient(app)
+        up = client.post(
+            "/api/recognize/upload",
+            files={"file": ("tiny.csv", b"cpds_id,v\nA,1\n", "text/csv")},
+        )
+        self.assertEqual(up.status_code, 200)
+        fid = up.json()["file_id"]
+        with client.stream(
+            "POST",
+            "/api/recognize/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": "希望快速分析，不要反复思考"}],
+                "columns": [{"field": "cpds_id", "title": "ID", "type": "text"}],
+                "file_ids": [fid],
+                "auto_skill": True,
+                "rows": [],
+            },
+        ) as res:
+            self.assertEqual(res.status_code, 200)
+            body = "".join(res.iter_text())
+        self.assertIn("正在解析附件", body)
+        self.assertIn("event: done", body)
+        self.assertIn('"intent": "recognize"', body)
+        self.assertNotIn("正在理解你的问题", body)
+        self.assertNotIn("没有收到附件", body)
+
     def test_stream_skips_fake_xlsx_and_keeps_good_file(self):
         from app.services import file_parser
 
