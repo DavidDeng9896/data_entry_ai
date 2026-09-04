@@ -1,6 +1,12 @@
 import unittest
 
-from app.services.row_merge import compose_extraction_reply, merge_extracted_rows, summarize_chunk_notes
+from app.schemas import ColumnDef
+from app.services.row_merge import (
+    compose_extraction_reply,
+    infer_merge_key_fields,
+    merge_extracted_rows,
+    summarize_chunk_notes,
+)
 
 
 class MergeExtractedRowsTest(unittest.TestCase):
@@ -89,6 +95,55 @@ class MergeExtractedRowsTest(unittest.TestCase):
         self.assertEqual(merged[0]["vss"], "1.2")
         self.assertEqual(merged[0]["_conflicts"]["cl"], ["0.4", "0.5"])
 
+    def test_same_cpds_different_treatment_group_stays_separate(self):
+        """Langendorff：同一化合物多处理组应保留多行，不能按 cpds_id 压成 1 行。"""
+        groups = ["control 1", "control 2", "0.4 μM", "2 μM", "10 μM", "washout", "Dofetilide"]
+        rows = [
+            {
+                "cpds_id": "HW181125",
+                "study_id": "ST-001",
+                "treatment_group": g,
+                "qt_interval_ms": str(100 + i),
+            }
+            for i, g in enumerate(groups)
+        ]
+        cols = [
+            ColumnDef(field="cpds_id", title="Cpds ID"),
+            ColumnDef(field="study_id", title="Study ID"),
+            ColumnDef(field="treatment_group", title="Treatment Group"),
+            ColumnDef(field="qt_interval_ms", title="QT"),
+        ]
+        key_fields = infer_merge_key_fields(cols)
+        self.assertEqual(key_fields, ["cpds_id", "study_id", "treatment_group"])
+        merged, conflicts = merge_extracted_rows(rows, key_fields=key_fields)
+        self.assertEqual(len(merged), 7)
+        self.assertEqual([r["treatment_group"] for r in merged], groups)
+        self.assertEqual(conflicts, [])
+
+    def test_duplicate_same_composite_key_still_merges(self):
+        rows = [
+            {"cpds_id": "HW1", "treatment_group": "control", "hr": "80"},
+            {"cpds_id": "HW1", "treatment_group": "control", "hr": "80", "pr": "120"},
+        ]
+        key_fields = ["cpds_id", "treatment_group"]
+        merged, conflicts = merge_extracted_rows(rows, key_fields=key_fields)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["hr"], "80")
+        self.assertEqual(merged[0]["pr"], "120")
+
+    def test_infer_merge_key_fields_pk_table(self):
+        cols = [ColumnDef(field="cpds_id", title="ID"), ColumnDef(field="cl", title="CL")]
+        self.assertEqual(infer_merge_key_fields(cols), ["cpds_id"])
+
+
+class InferMergeKeyFieldsTest(unittest.TestCase):
+    def test_includes_treatment_group_when_present(self):
+        cols = [
+            ColumnDef(field="cpds_id", title="ID"),
+            ColumnDef(field="treatment_group", title="Group"),
+        ]
+        self.assertEqual(infer_merge_key_fields(cols), ["cpds_id", "treatment_group"])
+
 
 class SummarizeChunkNotesTest(unittest.TestCase):
     def test_hides_empty_chunk_warnings(self):
@@ -120,6 +175,7 @@ class ComposeExtractionReplyTest(unittest.TestCase):
         self.assertNotIn("找不到主源", text)
         self.assertNotIn("方法页无结果", text)
         self.assertIn("2 行 → 1 行", text)
+        self.assertIn("化合物 ID", text)
 
     def test_single_file_keeps_inner_pagination_summary(self):
         inner = "共 3 段：1 段抽出数据，2 段无抽出结果（已忽略，避免和表内数据矛盾）。"

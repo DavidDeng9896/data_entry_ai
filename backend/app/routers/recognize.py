@@ -12,7 +12,7 @@ from ..services import file_parser, ai_service
 from ..services.ai_service import friendly_llm_error
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
-from ..services.row_merge import compose_extraction_reply, merge_extracted_rows
+from ..services.row_merge import compose_extraction_reply, infer_merge_key_fields, merge_extracted_rows
 from ..services.table_edit import apply_local_edit
 
 router = APIRouter(prefix="/api/recognize", tags=["recognize"])
@@ -232,10 +232,12 @@ def _run_chat(req: ChatRequest) -> dict:
         meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     raw_n = len(all_rows)
-    all_rows, conflicts = merge_extracted_rows(all_rows, key_field="cpds_id")
+    key_fields = infer_merge_key_fields(req.columns)
+    all_rows, conflicts = merge_extracted_rows(all_rows, key_fields=key_fields)
     return {
         "reply": compose_extraction_reply(
             chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+            key_fields=key_fields,
         ),
         "rows": all_rows,
         "intent": intent,
@@ -418,7 +420,8 @@ async def _aiter_chat_events(req: ChatRequest):
                 all_rows.extend(payload[1] or [])
 
     raw_n = len(all_rows)
-    all_rows, conflicts = merge_extracted_rows(all_rows, key_field="cpds_id")
+    key_fields = infer_merge_key_fields(req.columns)
+    all_rows, conflicts = merge_extracted_rows(all_rows, key_fields=key_fields)
     yield "step", {"text": f"合并完成 {len(all_rows)} 行"}
     names = []
     for r in resolved_list:
@@ -432,6 +435,7 @@ async def _aiter_chat_events(req: ChatRequest):
     yield "done", {
         "reply": compose_extraction_reply(
             chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
+            key_fields=key_fields,
         ),
         "rows": all_rows,
         "intent": intent,

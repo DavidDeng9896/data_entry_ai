@@ -13,7 +13,7 @@ from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 from .pk_extract import mock_extract_pk
 from .sheet_focus import focus_content_for_model
-from .row_merge import merge_extracted_rows, summarize_chunk_notes
+from .row_merge import infer_merge_key_fields, merge_extracted_rows, merge_key_label, summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
 _LLM_CHUNK_CHARS = 32000
@@ -737,10 +737,12 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                 note, rows = _split_chat_reply(raw, columns)
                 chunk_results.append((note, rows or []))
             raw_rows = [r for _, rs in chunk_results for r in rs]
-            merged, conflicts = merge_extracted_rows(raw_rows, key_field="cpds_id")
+            key_fields = infer_merge_key_fields(columns)
+            merged, conflicts = merge_extracted_rows(raw_rows, key_fields=key_fields)
             reply = summarize_chunk_notes(chunk_results)
             if len(merged) < len(raw_rows):
-                reply += f"\n已按化合物 ID 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
+                label = merge_key_label(key_fields)
+                reply += f"\n已按 {label} 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
             if conflicts:
                 reply += (
                     f"\n有 {len(conflicts)} 处分页取值不一致，已保留先出现的值并在表中标黄，请核对后再确认导入。"
@@ -761,7 +763,8 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []
-    merged, conflicts = merge_extracted_rows(rows or [], key_field="cpds_id")
+    key_fields = infer_merge_key_fields(columns)
+    merged, conflicts = merge_extracted_rows(rows or [], key_fields=key_fields)
     if conflicts:
         reply = (reply or "") + f"\n有 {len(conflicts)} 处重复行取值不一致，已合并并标黄。"
     return reply, merged
