@@ -10,11 +10,16 @@ CHAT_PHRASES = (
 RECOGNIZE_PHRASES = (
     "识别", "导入", "提取", "填表", "重新识别", "覆盖", "再导", "再抽", "重新抽",
     "过滤", "只要", "按规则", "按这个规则",
+    "分析", "解析", "读附件", "看附件", "开始识别",
 )
 
 
 def classify_intent(text: str, has_files: bool = False, has_rows: bool = False) -> str:
-    """返回 'recognize' | 'chat' | 'edit'。"""
+    """返回 'recognize' | 'chat' | 'edit'。
+
+    空表 + 有附件时，默认识别（用户多半是在催导入）；
+    已有填表行时，无明确再导关键词则默认问答，避免误覆盖。
+    """
     t = (text or "").strip()
     if not t:
         return "recognize" if has_files else "chat"
@@ -28,4 +33,4 @@ def classify_intent(text: str, has_files: bool = False, has_rows: bool = False) 
         return "recognize"
     if has_rows:
         return "chat"
-    return "chat"
+    return "recognize" if has_files else "chat"

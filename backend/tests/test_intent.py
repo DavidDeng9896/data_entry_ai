@@ -38,6 +38,33 @@ class ClassifyIntentTest(unittest.TestCase):
     def test_followup_without_keyword_is_chat_when_table_filled(self):
         self.assertEqual(classify_intent("这个 CL 看起来偏高", True, has_rows=True), "chat")
 
+    def test_analyze_with_files_empty_table_is_recognize(self):
+        """空表 + 已上传附件：用户说分析/开始就应识别，不能装成问答再问化合物号。"""
+        for text in (
+            "希望快速分析，不要反复思考",
+            "附件内容开始快速分析，不要反复思考",
+            "开始",
+            "分析一下",
+            "读附件",
+        ):
+            self.assertEqual(
+                classify_intent(text, has_files=True, has_rows=False),
+                "recognize",
+                text,
+            )
+
+    def test_plain_text_with_files_empty_table_is_recognize(self):
+        self.assertEqual(
+            classify_intent("按小鼠 PK 规则处理", has_files=True, has_rows=False),
+            "recognize",
+        )
+
+    def test_why_still_chat_when_empty_table_with_files(self):
+        self.assertEqual(
+            classify_intent("为啥没有 HW1？", has_files=True, has_rows=False),
+            "chat",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
