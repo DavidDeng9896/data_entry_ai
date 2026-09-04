@@ -33,6 +33,7 @@ export const api = {
   listSkills: () => req('/skills'),
   getSkill: (id) => req(`/skills/${id}`),
   saveSkill: (payload) => req('/skills', { method: 'POST', body: JSON.stringify(payload) }),
+  mergeSkill: (payload) => req('/skills/merge', { method: 'POST', body: JSON.stringify(payload) }),
   deleteSkill: (id) => req(`/skills/${id}`, { method: 'DELETE' }),
   enableSkill: (id) => req('/skills/enable', { method: 'POST', body: JSON.stringify({ id: id ?? null }) }),
   importSkillMd: (file) => {
@@ -56,6 +57,56 @@ export const api = {
   }),
   chatStream: async (payload, extra = {}) => {
     const res = await fetch(`${BASE}/recognize/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: extra.signal,
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.detail || data.message || `请求失败 ${res.status}`)
+    }
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let donePayload = null
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const parts = buf.split('\n\n')
+      buf = parts.pop()
+      for (const block of parts) {
+        if (!block.trim()) continue
+        let event = 'message'
+        const dataLines = []
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+        }
+        if (!dataLines.length) continue
+        let json
+        try {
+          json = JSON.parse(dataLines.join('\n'))
+        } catch {
+          continue
+        }
+        if (event === 'step' && extra.onStep) extra.onStep(json)
+        if (event === 'ping' && extra.onPing) extra.onPing(json)
+        if (event === 'error') throw new Error(json.message || '对话失败')
+        if (event === 'done') donePayload = json
+      }
+    }
+    if (!donePayload) throw new Error('流式响应未完成')
+    return donePayload
+  },
+
+  schemaChat: (payload) => req('/tables/schema/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  }),
+  schemaChatStream: async (payload, extra = {}) => {
+    const res = await fetch(`${BASE}/tables/schema/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

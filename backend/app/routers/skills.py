@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .. import database as db
+from ..services.skill_merge import merge_skill_markdown
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -22,6 +23,12 @@ class SkillSave(BaseModel):
 
 class SkillEnable(BaseModel):
     id: int | None = None
+
+
+class SkillMerge(BaseModel):
+    target_id: int
+    draft_md: str
+    name: str = ""
 
 
 @router.get("")
@@ -55,6 +62,25 @@ def delete_skill(skill_id: int):
 def enable_skill(body: SkillEnable):
     db.set_enabled_skill(body.id)
     return {"ok": True}
+
+
+@router.post("/merge")
+def merge_skill(body: SkillMerge):
+    target = db.get_skill(body.target_id)
+    if not target:
+        raise HTTPException(404, "目标 Skill 不存在")
+    if not (body.draft_md or "").strip():
+        raise HTTPException(400, "草稿内容为空")
+    try:
+        merged = merge_skill_markdown(
+            target.get("content") or "",
+            body.draft_md,
+            name=body.name or target.get("name") or "",
+        )
+    except ValueError as e:
+        raise HTTPException(500, str(e)) from e
+    skill_id = db.save_skill(body.target_id, (body.name or target["name"]).strip(), merged)
+    return {"ok": True, "id": skill_id, "content": merged}
 
 
 @router.post("/import-md")

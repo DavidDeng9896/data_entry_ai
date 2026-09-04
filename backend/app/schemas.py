@@ -79,3 +79,23 @@ class ChatResponse(BaseModel):
     skill_auto: bool = False
     skill_reason: str = ""
     intent: str = "recognize"
+
+
+class SchemaChatRequest(BaseModel):
+    messages: list[ChatMessage] = []
+    file_ids: list[str] = []
+    name: str = ""
+    description: str = ""
+    columns: list[ColumnDef] = []
+    skill_name: str = ""
+    skill_md: str = ""
+
+
+class SchemaChatResponse(BaseModel):
+    reply: str
+    intent: str
+    name: str = ""
+    description: str = ""
+    columns: list[ColumnDef] = []
+    skill_name: str = ""
+    skill_md: str = ""

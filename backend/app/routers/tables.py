@@ -1,10 +1,37 @@
-"""结果表 CRUD 接口：列表/详情/新建（一步含列）/更新/删除/复制"""
+"""结果表 CRUD 接口：列表/详情/新建（一步含列）/更新/删除/复制；建表 AI 对话"""
+import asyncio
+import json
+import queue
+
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .. import database as db
+from ..schemas import SchemaChatRequest
+from ..services.ai_service import friendly_llm_error
+from ..services.schema_chat import run_schema_chat
 
 router = APIRouter(prefix="/api/tables", tags=["tables"])
+
+_SSE_PADDING = ":" + (" " * 2048) + "\n\n"
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _run_schema(req: SchemaChatRequest, on_progress=None) -> dict:
+    return run_schema_chat(
+        messages=req.messages,
+        file_ids=req.file_ids,
+        name=req.name or "",
+        description=req.description or "",
+        columns=req.columns,
+        skill_name=req.skill_name or "",
+        skill_md=req.skill_md or "",
+        on_progress=on_progress,
+    )
 
 
 class ColumnIn(BaseModel):
@@ -41,6 +68,73 @@ class ImportCommit(BaseModel):
 @router.get("")
 def list_tables():
     return db.list_tables()
+
+
+@router.post("/schema/chat")
+def schema_chat(req: SchemaChatRequest):
+    try:
+        return _run_schema(req)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, friendly_llm_error(e)) from e
+
+
+@router.post("/schema/chat/stream")
+async def schema_chat_stream(req: SchemaChatRequest):
+    async def gen():
+        yield _SSE_PADDING
+        yield _sse("step", {"text": "已连接，开始处理…"})
+        last = ""
+        for m in reversed(req.messages or []):
+            if getattr(m, "role", None) == "user" and (m.content or "").strip():
+                last = m.content.strip()
+                break
+        from ..services.schema_intent import classify_schema_intent
+        intent = classify_schema_intent(last, has_files=bool(req.file_ids))
+        if intent == "chat":
+            yield _sse("step", {"text": "正在理解你的问题…", "intent": intent})
+        elif req.file_ids:
+            yield _sse("step", {"text": "正在解析附件…", "intent": intent})
+        else:
+            yield _sse("step", {"text": "正在根据描述设计列…", "intent": intent})
+        progress_q: queue.Queue = queue.Queue()
+
+        def on_progress(text: str):
+            progress_q.put(text)
+
+        try:
+            task = asyncio.create_task(asyncio.to_thread(_run_schema, req, on_progress))
+            while not task.done():
+                while True:
+                    try:
+                        yield _sse("step", {"text": progress_q.get_nowait(), "intent": intent})
+                    except queue.Empty:
+                        break
+                yield ": keepalive\n\n"
+                yield _sse("ping", {})
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+            while True:
+                try:
+                    yield _sse("step", {"text": progress_q.get_nowait(), "intent": intent})
+                except queue.Empty:
+                    break
+            yield _sse("done", task.result())
+        except Exception as e:
+            yield _sse("error", {"message": friendly_llm_error(e)})
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/{table_id}")

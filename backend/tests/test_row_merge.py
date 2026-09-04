@@ -119,7 +119,7 @@ class ComposeExtractionReplyTest(unittest.TestCase):
         self.assertIn("抽出 HW1", text)
         self.assertNotIn("找不到主源", text)
         self.assertNotIn("方法页无结果", text)
-        self.assertIn("2 行 → 1 行", text)
+        self.assertNotIn("已按", text)
 
     def test_single_file_keeps_inner_pagination_summary(self):
         inner = "共 3 段：1 段抽出数据，2 段无抽出结果（已忽略，避免和表内数据矛盾）。"

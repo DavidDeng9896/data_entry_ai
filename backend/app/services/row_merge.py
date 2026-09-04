@@ -1,4 +1,4 @@
-"""分页/多附件抽出的行按化合物 ID 合并；冲突保留首值并标记。"""
+"""分页摘要与可选的按调用方指定键合并（生产路径默认不合并）。"""
 from __future__ import annotations
 
 import math
@@ -27,8 +27,26 @@ def _values_equal(a, b) -> bool:
     return abs(fa - fb) / scale < 1e-2
 
 
-def merge_extracted_rows(rows: list[dict], *, key_field: str = "cpds_id") -> tuple[list[dict], list[dict]]:
-    """同一 key 合并为一行。空值被填上；两边都有且不等 → 保留先到的值，记入冲突。"""
+def _row_merge_key(row: dict, key_fields: list[str]) -> str:
+    parts = [_norm_key(row.get(f)) for f in key_fields]
+    if not any(parts):
+        return ""
+    return "\x00".join(parts)
+
+
+def _row_identity_label(row: dict, key_fields: list[str]) -> str:
+    vals = [str(row.get(f) or "").strip() for f in key_fields if not _blank(row.get(f))]
+    return " / ".join(vals) if vals else ""
+
+
+def merge_extracted_rows(
+    rows: list[dict],
+    *,
+    key_field: str = "cpds_id",
+    key_fields: list[str] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """同一复合键合并为一行。空值被填上；两边都有且不等 → 保留先到的值，记入冲突。"""
+    fields = list(key_fields or [key_field])
     merged: list[dict] = []
     index: dict[str, int] = {}
     conflicts: list[dict] = []
@@ -36,7 +54,7 @@ def merge_extracted_rows(rows: list[dict], *, key_field: str = "cpds_id") -> tup
     for raw in rows or []:
         incoming_conflicts = dict((raw or {}).get("_conflicts") or {})
         row = {k: v for k, v in (raw or {}).items() if k != "_conflicts"}
-        key = _norm_key(row.get(key_field))
+        key = _row_merge_key(row, fields)
         if not key:
             item = dict(row)
             if incoming_conflicts:
@@ -59,7 +77,7 @@ def merge_extracted_rows(rows: list[dict], *, key_field: str = "cpds_id") -> tup
                 if sv and sv not in seen:
                     seen.append(sv)
         for field, val in row.items():
-            if field == key_field or _blank(val):
+            if field in fields or _blank(val):
                 continue
             old = dest.get(field)
             if _blank(old):
@@ -72,7 +90,7 @@ def merge_extracted_rows(rows: list[dict], *, key_field: str = "cpds_id") -> tup
             if nv not in seen:
                 seen.append(nv)
             conflicts.append({
-                "cpds_id": dest.get(key_field) or key,
+                "cpds_id": _row_identity_label(dest, fields) or key,
                 "field": field,
                 "kept": str(old).strip(),
                 "others": [nv],
@@ -132,8 +150,6 @@ def compose_extraction_reply(
     if not (reply or "").strip():
         reply = f"合计 {len(merged)} 行。"
     extras: list[str] = []
-    if len(merged) < raw_n:
-        extras.append(f"已按化合物 ID 合并：{raw_n} 行 → {len(merged)} 行。")
     if new_conflicts:
         extras.append(f"有 {len(new_conflicts)} 处取值不一致，已标黄，请核对后再确认导入。")
     if extras:
