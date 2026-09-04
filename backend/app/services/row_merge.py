@@ -1,20 +1,8 @@
-"""分页/多附件抽出的行按实体键合并；冲突保留首值并标记。"""
+"""分页摘要与可选的按调用方指定键合并（生产路径默认不合并）。"""
 from __future__ import annotations
 
 import math
 import re
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ..schemas import ColumnDef
-
-# 除 cpds_id 外，参与行身份、不应被合并掉的列（按顺序追加到复合键）
-_ROW_IDENTITY_FIELDS = (
-    "study_id",
-    "treatment_group",
-    "dose_group",
-    "condition",
-)
 
 
 def _blank(v) -> bool:
@@ -37,33 +25,6 @@ def _values_equal(a, b) -> bool:
         return False
     scale = max(abs(fa), abs(fb), 1e-9)
     return abs(fa - fb) / scale < 1e-2
-
-
-def infer_merge_key_fields(columns: list[ColumnDef] | None) -> list[str]:
-    """从表头推断合并键：默认 cpds_id；若存在 study_id / treatment_group 等则纳入复合键。"""
-    fields = {c.field for c in (columns or []) if getattr(c, "field", None)}
-    keys: list[str] = []
-    if "cpds_id" in fields:
-        keys.append("cpds_id")
-    elif "compound_id" in fields:
-        keys.append("compound_id")
-    for f in _ROW_IDENTITY_FIELDS:
-        if f in fields and f not in keys:
-            keys.append(f)
-    return keys or ["cpds_id"]
-
-
-def merge_key_label(key_fields: list[str]) -> str:
-    labels = {
-        "cpds_id": "化合物 ID",
-        "compound_id": "化合物 ID",
-        "study_id": "Study ID",
-        "treatment_group": "处理组",
-        "dose_group": "剂量组",
-        "condition": "条件",
-    }
-    parts = [labels.get(f, f) for f in key_fields]
-    return " + ".join(parts) if len(parts) > 1 else parts[0]
 
 
 def _row_merge_key(row: dict, key_fields: list[str]) -> str:
@@ -180,7 +141,6 @@ def compose_extraction_reply(
     raw_n: int,
     n_items: int,
     new_conflicts: list[dict],
-    key_fields: list[str] | None = None,
 ) -> str:
     """多附件时隐藏空文件说明；单附件沿用内层分页摘要。"""
     if n_items > 1:
@@ -190,9 +150,6 @@ def compose_extraction_reply(
     if not (reply or "").strip():
         reply = f"合计 {len(merged)} 行。"
     extras: list[str] = []
-    if len(merged) < raw_n:
-        label = merge_key_label(key_fields or ["cpds_id"])
-        extras.append(f"已按 {label} 合并：{raw_n} 行 → {len(merged)} 行。")
     if new_conflicts:
         extras.append(f"有 {len(new_conflicts)} 处取值不一致，已标黄，请核对后再确认导入。")
     if extras:

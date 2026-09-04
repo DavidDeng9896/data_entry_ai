@@ -12,7 +12,7 @@ from ..services import file_parser, ai_service
 from ..services.ai_service import friendly_llm_error
 from ..services.intent import classify_intent
 from ..services.skill_matcher import resolve_skill
-from ..services.row_merge import compose_extraction_reply, infer_merge_key_fields, merge_extracted_rows
+from ..services.row_merge import compose_extraction_reply
 from ..services.table_edit import apply_local_edit
 
 router = APIRouter(prefix="/api/recognize", tags=["recognize"])
@@ -229,15 +229,12 @@ def _run_chat(req: ChatRequest) -> dict:
             names.append(nme)
     meta = _skill_meta_payload(resolved)
     if n > 1:
-        meta["skill_reason"] = "逐文件匹配 Skill 后合并行"
+        meta["skill_reason"] = "逐文件匹配 Skill 后拼接行"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     raw_n = len(all_rows)
-    key_fields = infer_merge_key_fields(req.columns)
-    all_rows, conflicts = merge_extracted_rows(all_rows, key_fields=key_fields)
     return {
         "reply": compose_extraction_reply(
-            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
-            key_fields=key_fields,
+            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=[],
         ),
         "rows": all_rows,
         "intent": intent,
@@ -420,9 +417,7 @@ async def _aiter_chat_events(req: ChatRequest):
                 all_rows.extend(payload[1] or [])
 
     raw_n = len(all_rows)
-    key_fields = infer_merge_key_fields(req.columns)
-    all_rows, conflicts = merge_extracted_rows(all_rows, key_fields=key_fields)
-    yield "step", {"text": f"合并完成 {len(all_rows)} 行"}
+    yield "step", {"text": f"抽出 {len(all_rows)} 行"}
     names = []
     for r in resolved_list:
         nme = r.get("skill_name")
@@ -430,12 +425,11 @@ async def _aiter_chat_events(req: ChatRequest):
             names.append(nme)
     meta = _skill_meta_payload(resolved)
     if n > 1:
-        meta["skill_reason"] = "同一结果表共用 Skill 后并行识别并合并"
+        meta["skill_reason"] = "同一结果表共用 Skill 后并行识别并拼接"
         meta["skill_name"] = "、".join(names) if names else meta.get("skill_name")
     yield "done", {
         "reply": compose_extraction_reply(
-            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=conflicts,
-            key_fields=key_fields,
+            chunk_notes, all_rows, raw_n=raw_n, n_items=n, new_conflicts=[],
         ),
         "rows": all_rows,
         "intent": intent,

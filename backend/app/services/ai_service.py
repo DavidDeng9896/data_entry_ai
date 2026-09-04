@@ -13,7 +13,7 @@ from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 from .pk_extract import mock_extract_pk
 from .sheet_focus import focus_content_for_model
-from .row_merge import infer_merge_key_fields, merge_extracted_rows, merge_key_label, summarize_chunk_notes
+from .row_merge import summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
 _LLM_CHUNK_CHARS = 32000
@@ -207,11 +207,11 @@ _BASELINE_PROMPT = """# 导入识别基线
 ### 4.4 实体、行展开与对照
 
 - 找出受试实体键（化合物号 / 样品号等）。目标表通常有类似 `Cpds ID` 的必填列——优先满足它。
+- **行数与切分以 Skill 为准。** Skill 未要求合并时：源中有几条结果就输出几行，不要因为某列值相同而合并。
 - **多实体报告很常见**（一份 Summary 多行化合物）：按实体拆成多行写入，除非 Skill 另有说明。
 - **宽表 vs 长表**：
-  - 源宽、目标宽：条件轴（种属、剂量、方向等）折叠进目标列名，通常一行一实体；
-  - 源长、目标宽：按实体聚合透视到目标列；
-  - 需要把一行拆成多行时，以 Skill 为准；无 Skill 时保持与目标表形态一致的保守做法。
+  - 源宽、目标宽：条件轴（种属、剂量、方向等）折叠进目标列名时，以 Skill / 目标表列为准；
+  - 源长表：默认按源结果行展开；仅当 Skill 要求按实体透视时才聚合。
 - **对照 / 空白 / 阳性药 / Reference**：默认不写入结果行。它们可能出现在：
   - 与受试物同一张表的另一数据块；
   - 同表前半或后半；
@@ -712,7 +712,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         if len(chunks) <= 1:
             msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
         else:
-            # 分页调用，合并行
+            # 分页调用；各段行原样拼接，不按业务键合并（行切分由 Skill / 模型决定）
             if settings["mock"]:
                 return _mock_chat_reply(
                     messages, columns, file_content, skill_content,
@@ -737,17 +737,8 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                 note, rows = _split_chat_reply(raw, columns)
                 chunk_results.append((note, rows or []))
             raw_rows = [r for _, rs in chunk_results for r in rs]
-            key_fields = infer_merge_key_fields(columns)
-            merged, conflicts = merge_extracted_rows(raw_rows, key_fields=key_fields)
             reply = summarize_chunk_notes(chunk_results)
-            if len(merged) < len(raw_rows):
-                label = merge_key_label(key_fields)
-                reply += f"\n已按 {label} 合并：{len(raw_rows)} 行 → {len(merged)} 行。"
-            if conflicts:
-                reply += (
-                    f"\n有 {len(conflicts)} 处分页取值不一致，已保留先出现的值并在表中标黄，请核对后再确认导入。"
-                )
-            return reply, merged
+            return reply, raw_rows
 
     if settings["mock"]:
         return _mock_chat_reply(
@@ -763,11 +754,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []
-    key_fields = infer_merge_key_fields(columns)
-    merged, conflicts = merge_extracted_rows(rows or [], key_fields=key_fields)
-    if conflicts:
-        reply = (reply or "") + f"\n有 {len(conflicts)} 处重复行取值不一致，已合并并标黄。"
-    return reply, merged
+    return reply, rows or []
 
 
 def _split_chat_reply(raw: str, columns: list[ColumnDef]) -> tuple[str, list[dict]]:
