@@ -69,6 +69,7 @@ class ChatRequest(BaseModel):
     table_name: Optional[str] = None
     auto_skill: bool = True
     rows: list[dict] = []            # 当前已填入结果表的行；问答/改格子时作上下文，不再抽文件
+    session_rules: str = ""          # 当前导入会话静默规则（关对话框丢弃）
 
 
 class ChatResponse(BaseModel):
@@ -79,6 +80,7 @@ class ChatResponse(BaseModel):
     skill_auto: bool = False
     skill_reason: str = ""
     intent: str = "recognize"
+    session_rules: str = ""          # 合并本轮 delta 后的会话规则
 
 
 class SchemaChatRequest(BaseModel):

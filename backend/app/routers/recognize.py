@@ -10,7 +10,7 @@ from .. import database as db
 from ..schemas import RecognizeRequest, ChatRequest
 from ..services import file_parser, ai_service
 from ..services.ai_service import friendly_llm_error
-from ..services.intent import classify_intent
+from ..services.intent_router import api_intent, decide_action, merge_session_rules
 from ..services.skill_matcher import resolve_skill
 from ..services.row_merge import compose_extraction_reply
 from ..services.table_edit import apply_local_edit
@@ -153,12 +153,47 @@ def _sanitize_rows(rows) -> list[dict]:
     return out
 
 
-def _classify_req(req: ChatRequest) -> tuple[str, list[str], list[dict], str]:
+def _sample_ids(rows: list[dict], limit: int = 8) -> list[str]:
+    out: list[str] = []
+    for r in rows or []:
+        v = str((r or {}).get("cpds_id") or "").strip()
+        if v and v not in out:
+            out.append(v)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _decide_for_req(req: ChatRequest) -> tuple[object, str, list[str], list[dict], str]:
+    """返回 (decision, merged_session_rules, file_ids, table_rows, last_user_text)。"""
     file_ids = _resolve_file_ids(req)
     last = _last_user_text(req.messages)
     table_rows = _sanitize_rows(getattr(req, "rows", None))
-    intent = classify_intent(last, has_files=bool(file_ids), has_rows=bool(table_rows))
-    return intent, file_ids, table_rows, last
+    settings = db.load_model_settings()
+    use_llm = (not settings.get("mock")) and bool((settings.get("text_model") or {}).get("api_key"))
+    file_names = [_file_label(fid) for fid in file_ids]
+    decision = decide_action(
+        last,
+        has_files=bool(file_ids),
+        has_rows=bool(table_rows),
+        session_rules=getattr(req, "session_rules", "") or "",
+        file_names=file_names,
+        sample_ids=_sample_ids(table_rows),
+        use_llm=use_llm,
+        llm_cfg=settings.get("text_model") if use_llm else None,
+    )
+    merged = merge_session_rules(
+        getattr(req, "session_rules", "") or "",
+        decision.rule_delta,
+        clear=decision.clear_rules,
+    )
+    return decision, merged, file_ids, table_rows, last
+
+
+def _classify_req(req: ChatRequest) -> tuple[str, list[str], list[dict], str]:
+    """兼容旧调用：返回 api intent + files + rows + last。"""
+    decision, _rules, file_ids, table_rows, last = _decide_for_req(req)
+    return api_intent(decision.action), file_ids, table_rows, last
 
 
 def _resolve_for_request(req: ChatRequest | RecognizeRequest, file_content: str | None, *, allow_auto: bool) -> dict:
@@ -192,15 +227,32 @@ def _qa_skill_meta(req: ChatRequest) -> dict:
 
 
 def _run_chat(req: ChatRequest) -> dict:
-    intent, file_ids, table_rows, last = _classify_req(req)
+    decision, session_rules, file_ids, table_rows, last = _decide_for_req(req)
+    intent = api_intent(decision.action)
 
-    if intent == "edit":
+    if decision.action == "clarify":
+        return {
+            "reply": decision.reply or "你是想重新抽附件覆盖当前表，只改已填格子，还是只回答问题？",
+            "rows": [],
+            "intent": "chat",
+            "session_rules": session_rules,
+            "file_meta": {"count": 0, "chars": 0, "truncated": False},
+            **_skill_meta_payload({
+                "skill_id": None,
+                "skill_name": None,
+                "skill_auto": False,
+                "skill_reason": "意图不清，先确认",
+            }),
+        }
+
+    if decision.action == "edit":
         reply, rows, ok = apply_local_edit(last, table_rows, req.columns)
         if ok:
             return {
                 "reply": reply,
                 "rows": rows,
                 "intent": "edit",
+                "session_rules": session_rules,
                 "file_meta": {"count": 0, "chars": 0, "truncated": False},
                 **_skill_meta_payload({
                     "skill_id": None,
@@ -217,12 +269,13 @@ def _run_chat(req: ChatRequest) -> dict:
         reply, _rows = ai_service.chat(
             req.messages, req.columns, resolved.get("skill_content"), None,
             intent="chat", file_meta=file_meta, table_name=req.table_name or "",
-            table_rows=table_rows,
+            table_rows=table_rows, session_rules=session_rules,
         )
         return {
             "reply": reply,
             "rows": [],
             "intent": "chat",
+            "session_rules": session_rules,
             "file_meta": file_meta,
             **_skill_meta_payload(resolved),
         }
@@ -241,8 +294,13 @@ def _run_chat(req: ChatRequest) -> dict:
         reply, rows = ai_service.chat(
             req.messages, req.columns, resolved.get("skill_content"), None,
             intent=intent, file_meta=file_meta, table_name=req.table_name or "",
+            session_rules=session_rules,
         )
-        return {"reply": reply, "rows": rows, "intent": intent, "file_meta": file_meta, **_skill_meta_payload(resolved)}
+        return {
+            "reply": reply, "rows": rows, "intent": intent,
+            "session_rules": session_rules, "file_meta": file_meta,
+            **_skill_meta_payload(resolved),
+        }
 
     all_rows: list[dict] = []
     chunk_notes: list[tuple[str, list[dict]]] = []
@@ -257,6 +315,7 @@ def _run_chat(req: ChatRequest) -> dict:
             intent=intent,
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
+            session_rules=session_rules,
         )
         label = item.get("label") or item["file_id"]
         sk = resolved.get("skill_name") or "基线"
@@ -284,6 +343,7 @@ def _run_chat(req: ChatRequest) -> dict:
         ),
         "rows": all_rows,
         "intent": intent,
+        "session_rules": session_rules,
         "file_meta": file_meta,
         **meta,
     }
@@ -333,7 +393,22 @@ async def _run_chat_with_progress(*args, **kwargs):
 
 
 async def _aiter_chat_events(req: ChatRequest):
-    intent, file_ids, _table_rows, _last = _classify_req(req)
+    decision, session_rules, file_ids, _table_rows, _last = _decide_for_req(req)
+    intent = api_intent(decision.action)
+
+    if decision.action == "clarify":
+        yield "step", {"text": "需要先确认一下…", "intent": "chat"}
+        yield "done", {
+            "reply": decision.reply or "你是想重新抽附件覆盖当前表，只改已填格子，还是只回答问题？",
+            "rows": [],
+            "intent": "chat",
+            "session_rules": session_rules,
+            "skill_id": None,
+            "skill_name": None,
+            "skill_auto": False,
+            "skill_reason": "意图不清，先确认",
+        }
+        return
 
     if intent in ("chat", "edit"):
         step_text = "正在按你的要求改已填格子…" if intent == "edit" else "正在理解你的问题…"
@@ -344,7 +419,9 @@ async def _aiter_chat_events(req: ChatRequest):
                 yield "ping", payload
             else:
                 result = payload
-        yield "done", {k: result[k] for k in ("reply", "rows", "intent", "skill_id", "skill_name", "skill_auto", "skill_reason")}
+        out = {k: result[k] for k in ("reply", "rows", "intent", "skill_id", "skill_name", "skill_auto", "skill_reason") if k in result}
+        out["session_rules"] = result.get("session_rules", session_rules)
+        yield "done", out
         return
 
     n_files = len(file_ids)
@@ -406,6 +483,7 @@ async def _aiter_chat_events(req: ChatRequest):
             intent=intent,
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
+            session_rules=session_rules,
         )
 
     if n == 1:
@@ -420,6 +498,7 @@ async def _aiter_chat_events(req: ChatRequest):
             intent=intent,
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
+            session_rules=session_rules,
         ):
             if kind == "ping":
                 yield "ping", payload
@@ -464,6 +543,7 @@ async def _aiter_chat_events(req: ChatRequest):
         async for kind, payload in _run_in_thread(
             ai_service.chat, req.messages, req.columns, None, None,
             intent=intent, file_meta=file_meta, table_name=req.table_name or "",
+            session_rules=session_rules,
         ):
             if kind == "ping":
                 yield "ping", payload
@@ -491,8 +571,10 @@ async def _aiter_chat_events(req: ChatRequest):
         ),
         "rows": all_rows,
         "intent": intent,
+        "session_rules": session_rules,
         **meta,
     }
+
 
 
 def _sse(event: str, data: dict) -> str:
