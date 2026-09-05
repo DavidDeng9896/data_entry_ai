@@ -1,4 +1,8 @@
-"""按 Skill「读取范围」裁 sheet；无 Skill 时按页名自判结论页 vs 过程页。"""
+"""按 Skill「读取范围」裁 sheet；无 Skill 时按页名自判结论页 vs 过程页。
+
+裁页只看真正的内容块（Sheet / 第 N 页）。文件名包装、标题像文件名的块
+不参与 keep/skip。裁完若没有有效正文，退回原文，避免只剩文件名。
+"""
 from __future__ import annotations
 
 import re
@@ -15,22 +19,62 @@ _SELF_KEEP = re.compile(
     re.I,
 )
 _FILE_WRAP = re.compile(r"^###\s*文件:")
+_FILE_EXT = re.compile(
+    r"\.(xlsx|xlsm|xls|csv|tsv|pdf|docx?|pptx?|png|jpe?g|zip)\s*$",
+    re.I,
+)
+_PAGE_HEAD = re.compile(r"^###\s*第\s*\d+", re.I)
 
 
 def _split_parts(content: str) -> list[str]:
     return [p for p in re.split(r"(?=^### )", content or "", flags=re.M) if p.strip()]
 
 
+def _heading(part: str) -> str:
+    return (part or "").splitlines()[0] if part else ""
+
+
 def _is_file_wrapper(part: str) -> bool:
-    """`### 文件: xxx.xlsx` 是解析包装，不是 sheet，不能参与读页筛选。"""
-    head = (part or "").splitlines()[0] if part else ""
-    return bool(_FILE_WRAP.match(head))
+    return bool(_FILE_WRAP.match(_heading(part)))
 
 
 def _sheet_title(part: str) -> str:
-    head = part.splitlines()[0]
+    head = _heading(part)
     m = re.search(r"###\s*(?:Sheet:\s*)?(.+)$", head)
     return (m.group(1) if m else head).strip()
+
+
+def _looks_like_filename(name: str) -> bool:
+    return bool(_FILE_EXT.search((name or "").strip()))
+
+
+def _is_meta_part(part: str) -> bool:
+    """包装行或标题本身是文件名：不当成 sheet 来筛选。"""
+    if _is_file_wrapper(part):
+        return True
+    if _PAGE_HEAD.match(_heading(part)):
+        return False
+    title = _sheet_title(part)
+    if _looks_like_filename(title):
+        return True
+    # `### 某文件.xlsx` 且正文几乎没有表格
+    if _looks_like_filename(_heading(part).lstrip("# ").strip()):
+        return True
+    return False
+
+
+def _part_body(part: str) -> str:
+    lines = (part or "").splitlines()
+    return "\n".join(lines[1:]).strip()
+
+
+def _has_payload(parts: list[str]) -> bool:
+    for p in parts:
+        if _is_meta_part(p):
+            continue
+        if _part_body(p):
+            return True
+    return False
 
 
 def _norm(name: str) -> str:
@@ -38,12 +82,21 @@ def _norm(name: str) -> str:
 
 
 def _listed(name: str, tokens: list[str]) -> bool:
+    """只匹配页名，不匹配文件名。去空格后相等，或词是页名的连续片段。"""
+    if _looks_like_filename(name):
+        return False
     n = _norm(name)
     if not n:
         return False
     for raw in tokens:
         t = _norm(raw)
-        if t and (t in n or n in t):
+        if not t:
+            continue
+        if n == t:
+            return True
+        if t in n:
+            return True
+        if n in t and len(n) >= 2:
             return True
     return False
 
@@ -101,20 +154,20 @@ def _keep_by_self(parts: list[str]) -> list[str]:
 
 
 def focus_content_for_model(content: str, skill_content: str | None = None) -> str:
-    """有 Skill 读取范围则按其裁页；否则按页名自判。裁完为空则退回原文。"""
+    """有 Skill 读取范围则按其裁页；否则按页名自判。裁完无正文则退回原文。"""
     parts = _split_parts(content)
     if not parts:
         return content or ""
-    wraps = [p for p in parts if _is_file_wrapper(p)]
-    sheets = [p for p in parts if not _is_file_wrapper(p)]
-    target = sheets or parts
+    meta = [p for p in parts if _is_meta_part(p)]
+    selectable = [p for p in parts if not _is_meta_part(p)]
+    if not selectable:
+        return content or ""
     policy = parse_sheet_policy(skill_content)
     if policy:
-        kept = _keep_by_skill(target, policy)
+        kept = _keep_by_skill(selectable, policy)
     else:
-        kept = _keep_by_self(target)
-    if not kept:
+        kept = _keep_by_self(selectable)
+    if not _has_payload(kept):
         return content or ""
-    if wraps and sheets:
-        return "\n".join(wraps[:1] + kept)
-    return "\n".join(kept)
+    prefix = [p for p in meta if _is_file_wrapper(p)][:1]
+    return "\n".join(prefix + kept)
