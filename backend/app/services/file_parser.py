@@ -88,29 +88,18 @@ def get_image_bytes(file_id: str) -> tuple[bytes, str]:
 
 
 def parse_to_text(file_id: str, max_chars: int = 0) -> str:
-    """把文件内容解析成文本（markdown 表格优先）。
+    """统一走章节树再渲染，避免与 parse_to_sections 双解析。
     max_chars <= 0 表示不截断；仅当 max_chars > 0 且超长时才截断。
     """
-    path = _get_path(file_id)
-    ext = path.suffix.lower()
+    from .section_model import render_sections
+    from .section_parse import parse_to_sections
 
-    if ext in EXCEL_EXTS:
-        text = _parse_excel(path)
-    elif ext == ".pdf":
-        text = _parse_pdf(path)
-    elif ext == ".docx":
-        from .section_parse import _docx_sections
-        from .section_model import render_sections
-        text = render_sections(_docx_sections(path))
-    elif ext in {".txt", ".md", ".json"}:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    else:
-        raise ValueError(f"不支持的文件类型: {ext}（扫描件/图片请走视觉模型）")
-
+    text = render_sections(parse_to_sections(file_id))
     if max_chars and max_chars > 0 and len(text) > max_chars:
         orig = len(text)
         text = text[:max_chars] + f"\n...(已截断，共 {orig} 字符)"
     return text
+
 
 
 _FMT_DATE = re.compile(r"[yY]{2,}|[mM]{2,}|[dD]{2,}")

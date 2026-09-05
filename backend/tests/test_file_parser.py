@@ -22,7 +22,9 @@ class ParseToTextTruncateTest(unittest.TestCase):
     def test_positive_max_chars_truncates(self):
         text = file_parser.parse_to_text(self.file_id, max_chars=100)
         self.assertIn("已截断", text)
-        self.assertTrue(text.startswith("X" * 100))
+        # 统一走章节渲染后，截断点可能落在标题之后；只要求正文被截且带标记
+        self.assertLess(len(text), 180)
+        self.assertIn("X", text)
 
 
 class ExcelDisplayFormatTest(unittest.TestCase):

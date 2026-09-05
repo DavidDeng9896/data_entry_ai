@@ -29,25 +29,114 @@ def parse_to_sections(file_id: str) -> list[Section]:
     ext = path.suffix.lower()
     label = original_filename(file_id)
     head = Section(title=label, kind="file", text="")
-    if ext in EXCEL_EXTS and ext not in {".csv", ".tsv"}:
-        return [head] + _excel_sections(path)
-    if ext in {".csv", ".tsv"}:
-        return [head, Section(title=label, kind="sheet", text=_parse_excel(path))]
-    if ext == ".pdf":
-        return [head] + _pdf_sections(path)
-    if ext in {".docx"}:
-        return [head] + _docx_sections(path)
-    if ext in IMAGE_EXTS:
-        data = path.read_bytes()
-        mime = "image/jpeg" if ext in {".jpg", ".jpeg"} else f"image/{ext.lstrip('.')}"
-        return [head, Section(
-            title=label, kind="heading", text="（整份为图片）",
-            images=[SectionImage(name=label, mime=mime, data=data)],
-        )]
-    text = path.read_text(encoding="utf-8", errors="replace") if ext in {".txt", ".md", ".json"} else ""
-    if text:
-        return [head, Section(title=label, kind="heading", text=text)]
-    raise ValueError(f"不支持的文件类型: {ext}")
+
+    from .anydoc_fallback import (
+        ANYDOC_EXTRA_EXTS,
+        sections_have_payload,
+        try_anydoc_sections,
+    )
+
+    try:
+        if ext in EXCEL_EXTS and ext not in {".csv", ".tsv"}:
+            sections = [head] + _excel_sections(path)
+        elif ext in {".csv", ".tsv"}:
+            sections = [head, Section(title=label, kind="sheet", text=_parse_excel(path))]
+        elif ext == ".pdf":
+            sections = [head] + _enrich_empty_pdf_pages(path, _pdf_sections(path))
+        elif ext in {".docx"}:
+            sections = [head] + _docx_sections(path)
+        elif ext in IMAGE_EXTS:
+            data = path.read_bytes()
+            mime = "image/jpeg" if ext in {".jpg", ".jpeg"} else f"image/{ext.lstrip('.')}"
+            sections = [head, Section(
+                title=label, kind="heading", text="（整份为图片）",
+                images=[SectionImage(name=label, mime=mime, data=data)],
+            )]
+        elif ext in {".txt", ".md", ".json"}:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if not text:
+                raise ValueError(f"空文件: {ext}")
+            sections = [head, Section(title=label, kind="heading", text=text)]
+        elif ext in ANYDOC_EXTRA_EXTS:
+            sections = None
+        else:
+            raise ValueError(f"不支持的文件类型: {ext}")
+    except Exception as native_err:
+        fallback = try_anydoc_sections(path, file_label=label)
+        if fallback and sections_have_payload(fallback):
+            return fallback
+        raise native_err
+
+    if sections is None or not sections_have_payload(sections):
+        fallback = try_anydoc_sections(path, file_label=label)
+        if fallback and sections_have_payload(fallback):
+            return fallback
+        if sections is None:
+            raise ValueError(f"不支持的文件类型: {ext}")
+    return sections
+
+
+def _nearly_empty_text(text: str) -> bool:
+    return len((text or "").strip()) < 40
+
+
+def _page_has_vision_image(sec: Section) -> bool:
+    return any(im.data and im.mime.startswith("image/") for im in sec.images)
+
+
+def _rasterize_pdf_page(path: Path, page_no: int, scale: float = 2.0) -> SectionImage | None:
+    """把 PDF 第 page_no 页（1-based）栅格成 PNG，供扫描页送视觉。"""
+    try:
+        import pypdfium2 as pdfium
+    except Exception:
+        return None
+    try:
+        doc = pdfium.PdfDocument(str(path))
+    except Exception:
+        return None
+    try:
+        if page_no < 1 or page_no > len(doc):
+            return None
+        page = doc[page_no - 1]
+        bitmap = page.render(scale=scale)
+        pil = bitmap.to_pil()
+        import io
+        buf = io.BytesIO()
+        pil.save(buf, format="PNG")
+        return SectionImage(
+            name=f"page{page_no}-raster.png",
+            mime="image/png",
+            data=buf.getvalue(),
+            note="扫描/空页栅格",
+        )
+    except Exception:
+        return None
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+
+
+def _enrich_empty_pdf_pages(path: Path, pages: list[Section]) -> list[Section]:
+    """正文几乎为空的页：若无可送视觉的图，则栅格化整页挂上。"""
+    out = []
+    for sec in pages:
+        if sec.kind != "page" or not _nearly_empty_text(sec.text) or _page_has_vision_image(sec):
+            out.append(sec)
+            continue
+        try:
+            page_no = int(str(sec.title))
+        except ValueError:
+            out.append(sec)
+            continue
+        raster = _rasterize_pdf_page(path, page_no)
+        if raster is None:
+            out.append(sec)
+            continue
+        images = list(sec.images) + [raster]
+        out.append(Section(sec.title, sec.kind, sec.text, images, sec.role))
+    return out
 
 
 def _excel_sections(path: Path) -> list[Section]:
@@ -306,11 +395,23 @@ def _image_only_section(sec: Section) -> bool:
     return bool(sec.images) and (not body or body == "（整份为图片）")
 
 
+def _empty_page_with_images(sec: Section) -> bool:
+    """仅 PDF 空页/扫描页：全文模式下补送视觉。短正文的 sheet 不算。"""
+    if sec.kind != "page":
+        return False
+    if not any(im.data and im.mime.startswith("image/") for im in sec.images):
+        return False
+    return _nearly_empty_text(sec.text)
+
+
 def vision_images_to_send(used: list[Section], mode: str) -> list[SectionImage]:
-    """结果区或用户点名的章才送图；全文回退不倾销过程图。单独图片文件例外。"""
+    """结果区或用户点名的章才送图；全文时只补空页/纯图章，不倾销过程图。"""
     content = [s for s in used if s.kind != "file"]
     if mode in ("result", "picked"):
         return images_for_vision(content)
     if content and all(_image_only_section(s) for s in content):
         return images_for_vision(content)
+    empty_img = [s for s in content if _empty_page_with_images(s) or _image_only_section(s)]
+    if empty_img:
+        return images_for_vision(empty_img)
     return []
