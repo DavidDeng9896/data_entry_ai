@@ -278,6 +278,7 @@ const chatThinking = ref(false)
 const chatMsgs = ref(null)
 const pickedSkill = ref('auto')
 const streamIntent = ref('recognize')
+const sessionRules = ref('')
 const unreadDone = ref(false)
 const fileInput = ref(null)
 const chatQueue = ref([])
@@ -373,6 +374,7 @@ const noticeIcon = computed(() => ({
 }[noticeType.value] || 'ri-information-line'))
 
 onMounted(async () => {
+  sessionRules.value = ''
   await loadColumns()
   skills.value = await api.listSkills()
   pickedSkill.value = 'auto'
@@ -384,6 +386,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  sessionRules.value = ''
   stopClock()
   abortCtrl.value?.abort()
   window.removeEventListener('keydown', onWinKeydown, true)
@@ -785,7 +788,8 @@ async function runTurn() {
       ...skillPayload(),
       file_ids: readyFileIds.value,
       table_name: props.tableName || '',
-      rows: currentFilledRows()
+      rows: currentFilledRows(),
+      session_rules: sessionRules.value || ''
     }, {
       signal: abortCtrl.value.signal,
       onStep: (step) => {
@@ -822,6 +826,9 @@ async function runTurn() {
     if (myTurn !== turnSeq) return
     assistant.streaming = false
     assistant.content = res.reply || ''
+    if (typeof res.session_rules === 'string') {
+      sessionRules.value = res.session_rules
+    }
     if (res.intent) streamIntent.value = res.intent
     if (res.intent === 'edit' && Array.isArray(res.rows)) {
       applyRows(res.rows, { replace: true })

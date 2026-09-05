@@ -298,7 +298,7 @@ _OUTPUT_CHAT_QA = """## 本次输出协议（本轮仅问答）
 本轮用户在提问、确认或讨论**已经导入的结果表**，**不要识别、不要重新读附件、不要输出 <<<ROWS>>>、不要给出填表 JSON**。
 
 已导入的行会作为「当前结果表」附在对话里：
-- 问「为啥 xxx 化合物数据没有」时：先在当前表里核对 `cpds_id` / 化合物号是否出现；若没有，根据对话里已知的抽取规则（过滤对照、匹配键、种属表、Skill）解释可能没匹配上的原因。
+- 问「为啥 xxx 化合物数据没有」时：先在当前表里核对 `cpds_id` / 化合物号是否出现；若没有，根据对话里已知的抽取规则（过滤对照、匹配键、种属表、Skill、会话规则）解释可能没匹配上的原因。
 - 不要编造该化合物在源文件中的数值。
 - 若结果表为空：不要假装「没收到附件」，也不要追问化合物号来代替导入；直接告诉用户发「识别」或空发送即可开始抽数。
 - 用简短中文回答即可。
@@ -328,14 +328,25 @@ def _skill_section(skill_content: str | None) -> str:
     )
 
 
+def _session_rules_section(session_rules: str | None) -> str:
+    text = (session_rules or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n\n## 当前导入会话规则（用户在本对话框内补充的约束，优先于 Skill 中冲突的旧约定）\n"
+        f"{text}"
+    )
+
+
 def _build_system_prompt(
     columns: list[ColumnDef],
     skill_content: str | None,
     *,
     mode: str = "recognize",
     intent: str = "recognize",
+    session_rules: str | None = None,
 ) -> str:
-    """组装 system prompt：基线 + 目标列 + 输出协议 + 可选 Skill。"""
+    """组装 system prompt：基线 + 目标列 + 输出协议 + 可选 Skill + 会话规则。"""
     if mode == "chat" and intent == "chat":
         output = _OUTPUT_CHAT_QA
     elif mode == "chat":
@@ -348,6 +359,7 @@ def _build_system_prompt(
         f"{_columns_prompt(columns)}\n\n"
         f"{output}"
         f"{_skill_section(skill_content)}"
+        f"{_session_rules_section(session_rules)}"
     )
 
 
@@ -688,11 +700,14 @@ def _is_pk_target(table_name: str, columns: list[ColumnDef]) -> bool:
 
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
          file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
-         table_name: str = "", table_rows: list[dict] | None = None, on_progress=None) -> tuple[str, list[dict]]:
+         table_name: str = "", table_rows: list[dict] | None = None, on_progress=None,
+         session_rules: str | None = None) -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
-    system = _build_system_prompt(columns, skill_content, mode="chat", intent=intent)
+    system = _build_system_prompt(
+        columns, skill_content, mode="chat", intent=intent, session_rules=session_rules,
+    )
 
     msgs: list[dict] = [{"role": "system", "content": system}]
     for m in messages:

@@ -136,6 +136,7 @@ class ChatStreamApiTest(unittest.TestCase):
                 "file_ids": [fid],
                 "auto_skill": True,
                 "rows": [],
+                "session_rules": "",
             },
         ) as res:
             self.assertEqual(res.status_code, 200)
@@ -143,8 +144,32 @@ class ChatStreamApiTest(unittest.TestCase):
         self.assertIn("正在解析附件", body)
         self.assertIn("event: done", body)
         self.assertIn('"intent": "recognize"', body)
+        self.assertIn("希望快速分析", body)  # session_rules echoed
         self.assertNotIn("正在理解你的问题", body)
         self.assertNotIn("没有收到附件", body)
+
+    def test_stream_vague_with_rows_and_files_clarifies(self):
+        client = TestClient(app)
+        up = client.post(
+            "/api/recognize/upload",
+            files={"file": ("tiny.csv", b"cpds_id,v\nA,1\n", "text/csv")},
+        )
+        fid = up.json()["file_id"]
+        with client.stream(
+            "POST",
+            "/api/recognize/chat/stream",
+            json={
+                "messages": [{"role": "user", "content": "这个看起来偏高"}],
+                "columns": [{"field": "cpds_id", "title": "ID", "type": "text"}],
+                "file_ids": [fid],
+                "rows": [{"cpds_id": "HW1"}],
+                "auto_skill": True,
+            },
+        ) as res:
+            body = "".join(res.iter_text())
+        self.assertIn("需要先确认一下", body)
+        self.assertIn('"intent": "chat"', body)
+        self.assertNotIn("正在解析附件", body)
 
     def test_stream_skips_fake_xlsx_and_keeps_good_file(self):
         from app.services import file_parser
