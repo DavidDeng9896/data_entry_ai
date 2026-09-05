@@ -58,12 +58,10 @@ def _short_parse_error(exc: BaseException) -> str:
 def _load_one_file_item(fid: str, max_chars: int) -> dict:
     try:
         label = file_parser.original_filename(fid)
-        sections = []
-        try:
-            from ..services.section_parse import parse_to_sections
-            sections = parse_to_sections(fid)
-        except Exception:
-            sections = []
+        from ..services.section_model import render_sections
+        from ..services.section_parse import parse_to_sections
+
+        sections = parse_to_sections(fid)
         if file_parser.is_image(fid):
             text = f"### 文件: {label}\n（已上传图片，将按图片识别）"
             return {
@@ -71,7 +69,10 @@ def _load_one_file_item(fid: str, max_chars: int) -> dict:
                 "chars": len(text), "truncated": False,
                 "sections": sections,
             }
-        text = file_parser.parse_to_text(fid, max_chars=max_chars)
+        text = render_sections(sections)
+        if max_chars and max_chars > 0 and len(text) > max_chars:
+            orig = len(text)
+            text = text[:max_chars] + f"\n...(已截断，共 {orig} 字符)"
         wrapped = f"### 文件: {label}\n{text}"
         return {
             "file_id": fid,
@@ -83,6 +84,7 @@ def _load_one_file_item(fid: str, max_chars: int) -> dict:
         }
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
+
 
 
 def _try_load_one_file_item(fid: str, max_chars: int) -> tuple[dict | None, str | None]:
@@ -608,23 +610,27 @@ async def upload(file: UploadFile):
 @router.post("/run")
 def run(req: RecognizeRequest):
     try:
+        sections = None
         if file_parser.is_image(req.file_id):
             file_content, file_meta = None, {"count": 1, "chars": 0, "truncated": False}
         else:
-            text = file_parser.parse_to_text(req.file_id, max_chars=_parse_max_chars())
-            file_content, file_meta = text, {"count": 1, "chars": len(text), "truncated": "已截断" in text}
+            from ..services.section_model import render_sections
+            from ..services.section_parse import parse_to_sections
+            sections = parse_to_sections(req.file_id)
+            text = render_sections(sections)
+            max_chars = _parse_max_chars()
+            if max_chars and max_chars > 0 and len(text) > max_chars:
+                orig = len(text)
+                text = text[:max_chars] + f"\n...(已截断，共 {orig} 字符)"
+            file_content, file_meta = text, {
+                "count": 1, "chars": len(text), "truncated": "已截断" in text,
+            }
         resolved = _resolve_for_request(req, file_content or "", allow_auto=True)
         if file_parser.is_image(req.file_id):
             rows, message = ai_service.recognize_image(req.file_id, req.columns, resolved.get("skill_content"))
         else:
             if not (file_content or "").strip():
                 return {"rows": [], "message": "未能从文件中解析出内容", **_skill_meta_payload(resolved)}
-            sections = None
-            try:
-                from ..services.section_parse import parse_to_sections
-                sections = parse_to_sections(req.file_id)
-            except Exception:
-                sections = None
             rows, message = ai_service.recognize_text(
                 file_content, req.columns, resolved.get("skill_content"),
                 table_name=getattr(req, "table_name", None) or "",
