@@ -11,13 +11,20 @@ _SELF_SKIP = re.compile(
 )
 _SELF_KEEP = re.compile(
     r"cover|封面|signature|summary|汇总|参数|parameter|assay|ic50|"
-    r"remaining|papp|solubility",
+    r"result|remaining|papp|solubility",
     re.I,
 )
+_FILE_WRAP = re.compile(r"^###\s*文件:")
 
 
 def _split_parts(content: str) -> list[str]:
     return [p for p in re.split(r"(?=^### )", content or "", flags=re.M) if p.strip()]
+
+
+def _is_file_wrapper(part: str) -> bool:
+    """`### 文件: xxx.xlsx` 是解析包装，不是 sheet，不能参与读页筛选。"""
+    head = (part or "").splitlines()[0] if part else ""
+    return bool(_FILE_WRAP.match(head))
 
 
 def _sheet_title(part: str) -> str:
@@ -98,11 +105,16 @@ def focus_content_for_model(content: str, skill_content: str | None = None) -> s
     parts = _split_parts(content)
     if not parts:
         return content or ""
+    wraps = [p for p in parts if _is_file_wrapper(p)]
+    sheets = [p for p in parts if not _is_file_wrapper(p)]
+    target = sheets or parts
     policy = parse_sheet_policy(skill_content)
     if policy:
-        kept = _keep_by_skill(parts, policy)
+        kept = _keep_by_skill(target, policy)
     else:
-        kept = _keep_by_self(parts)
-    if kept:
-        return "\n".join(kept)
-    return content or ""
+        kept = _keep_by_self(target)
+    if not kept:
+        return content or ""
+    if wraps and sheets:
+        return "\n".join(wraps[:1] + kept)
+    return "\n".join(kept)

@@ -75,6 +75,47 @@ class SheetFocusTest(unittest.TestCase):
         self.assertNotIn("Raw Data", focused)
         self.assertNotIn("Materials", focused)
 
+    def test_filename_wrapper_is_kept_as_prefix_only(self):
+        text = "\n".join([
+            "### 文件: 小鼠PK数据-AUC和F汇总.xlsx",
+            "### Sheet: 封面",
+            "普瑞昇",
+            "### Sheet: 原始数据",
+            "peak",
+        ])
+        focused = focus_content_for_model(text, None)
+        self.assertIn("### 文件:", focused)
+        self.assertIn("封面", focused)
+        self.assertNotIn("原始数据", focused)
+
+    def test_filename_wrapper_with_huizong_does_not_drop_result_sheet(self):
+        """### 文件: …汇总.xlsx 不能被「汇总」当成结论页，否则只剩文件名。"""
+        text = "\n".join([
+            "### 文件: 20210511 A375 CD73 ATP-GLO 汇总.xlsx",
+            "### Sheet: Result sheet",
+            "Method name: ATP-GLO",
+            "HW100003",
+            "浓度，n M",
+        ])
+        focused = focus_content_for_model(text, None)
+        self.assertIn("Result sheet", focused)
+        self.assertIn("HW100003", focused)
+        self.assertIn("ATP-GLO", focused)
+
+    def test_skill_huizong_include_does_not_keep_only_filename(self):
+        skill = """
+## 读取范围
+- 读取：`封面`、`结果汇总`
+"""
+        text = "\n".join([
+            "### 文件: 小鼠PK数据-AUC和F汇总.xlsx",
+            "### Sheet: Result sheet",
+            "HW1 0.20",
+        ])
+        focused = focus_content_for_model(text, skill)
+        self.assertIn("HW1", focused)
+        self.assertIn("Result sheet", focused)
+
 
 if __name__ == "__main__":
     unittest.main()
