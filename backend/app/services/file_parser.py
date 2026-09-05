@@ -98,6 +98,10 @@ def parse_to_text(file_id: str, max_chars: int = 0) -> str:
         text = _parse_excel(path)
     elif ext == ".pdf":
         text = _parse_pdf(path)
+    elif ext == ".docx":
+        from .section_parse import _docx_sections
+        from .section_model import render_sections
+        text = render_sections(_docx_sections(path))
     elif ext in {".txt", ".md", ".json"}:
         text = path.read_text(encoding="utf-8", errors="replace")
     else:
