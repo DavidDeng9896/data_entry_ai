@@ -75,7 +75,29 @@ class MergeExtractedRowsTest(unittest.TestCase):
         self.assertEqual(merged[0]["_conflicts"]["iv_1mpk_vss_l_kg"], ["1.21", "0.94"])
         self.assertEqual(conflicts, [])
 
-    def test_merges_inherited_conflicts_across_files(self):
+    def test_dog_pk_chunk_segments_merge_to_one_row(self):
+        """分页各段各抽一行同一化合物时，应合并为一行并互补填空。"""
+        rows = [
+            {
+                "cpds_id": "HW350003A",
+                "iv_1mpk_cl_l_h_kg": "0.427",
+                "iv_1mpk_vss_l_kg": "1.21",
+                "po_5_mpk_cmax_ng_ml": "",
+            },
+            {
+                "cpds_id": "HW350003A",
+                "iv_1mpk_cl_l_h_kg": "",
+                "po_5_mpk_cmax_ng_ml": "120.5",
+                "po_5_mpk_tmax_hr": "1.33",
+            },
+        ]
+        merged, conflicts = merge_extracted_rows(rows, key_field="cpds_id")
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["cpds_id"], "HW350003A")
+        self.assertEqual(merged[0]["iv_1mpk_cl_l_h_kg"], "0.427")
+        self.assertEqual(merged[0]["po_5_mpk_cmax_ng_ml"], "120.5")
+        self.assertEqual(conflicts, [])
+
         rows = [
             {
                 "cpds_id": "HW1",
