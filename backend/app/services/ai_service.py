@@ -15,7 +15,7 @@ from .pk_extract import mock_extract_pk
 from .sheet_focus import focus_content_for_model
 from .section_intent import ask_user_where, content_for_extract
 from .section_parse import vision_images_to_send
-from .row_merge import summarize_chunk_notes
+from .row_merge import merge_extracted_rows, summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
 _LLM_CHUNK_CHARS = 32000
@@ -788,7 +788,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
         if len(chunks) <= 1:
             msgs.append({"role": "user", "content": _file_user_payload(file_content, file_meta, vision_imgs)})
         else:
-            # 分页调用；各段行原样拼接，不按业务键合并（行切分由 Skill / 模型决定）
+            # 分页调用；各段行按 cpds_id 合并（互补填空，冲突标黄）
             if settings["mock"]:
                 return _mock_chat_reply(
                     messages, columns, file_content, skill_content,
@@ -814,10 +814,13 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                 note, rows = _split_chat_reply(raw, columns)
                 chunk_results.append((note, rows or []))
             raw_rows = [r for _, rs in chunk_results for r in rs]
+            merged_rows, chunk_conflicts = merge_extracted_rows(raw_rows, key_field="cpds_id")
             reply = summarize_chunk_notes(chunk_results)
-            if intent == "recognize" and not raw_rows and tagged_sections:
+            if chunk_conflicts:
+                reply = reply.rstrip() + f"\n有 {len(chunk_conflicts)} 处分页取值不一致，已标黄，请核对。"
+            if intent == "recognize" and not merged_rows and tagged_sections:
                 return ask_user_where(tagged_sections), []
-            return reply, raw_rows
+            return reply, merged_rows
 
     if settings["mock"]:
         return _mock_chat_reply(

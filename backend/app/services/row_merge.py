@@ -1,4 +1,4 @@
-"""分页摘要与可选的按调用方指定键合并（生产路径默认不合并）。"""
+"""分页摘要与按 cpds_id 合并（分页路径、多附件拼接时去重互补）。"""
 from __future__ import annotations
 
 import math
