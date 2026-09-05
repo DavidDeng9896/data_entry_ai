@@ -13,6 +13,8 @@ from ..schemas import ColumnDef, ChatMessage
 from . import file_parser
 from .pk_extract import mock_extract_pk
 from .sheet_focus import focus_content_for_model
+from .section_intent import ask_user_where, content_for_extract
+from .section_parse import vision_images_to_send
 from .row_merge import summarize_chunk_notes
 
 # 单次送给模型的正文上限。超过则按 Sheet/章节分页，避免网关 504。
@@ -582,9 +584,14 @@ def _complete(client: OpenAI, model: str, messages: list[dict], *,
 
 
 def recognize_text(content: str, columns: list[ColumnDef], skill_content: str | None,
-                   table_name: str = "") -> tuple[list[dict], str]:
+                   table_name: str = "", sections=None) -> tuple[list[dict], str]:
     settings = db.load_model_settings()
-    content = focus_content_for_model(content, skill_content) or content
+    if sections:
+        content, _used, _mode, _tagged = content_for_extract(
+            sections, skill_content=skill_content, table_name=table_name,
+        )
+    else:
+        content = focus_content_for_model(content, skill_content) or content
     if settings["mock"]:
         simulated = _mock_extract_with_skill(content, columns, skill_content, table_name=table_name)
         if simulated:
@@ -641,6 +648,36 @@ def table_rows_context(rows: list[dict] | None, columns: list[ColumnDef], limit:
         + "\n".join(lines)
         + extra
     )
+
+
+def _model_cfg_for_chat(settings: dict, has_images: bool) -> dict:
+    text = settings["text_model"]
+    if not has_images:
+        return text
+    vision = settings.get("vision_model") or {}
+    if (vision.get("api_key") or "").strip() and (vision.get("model") or "").strip():
+        return vision
+    return text
+
+
+def _file_user_payload(file_content: str, file_meta: dict | None, images=None):
+    text = _file_user_message(file_content, file_meta)
+    usable = []
+    for im in images or []:
+        if im.data and im.mime.startswith("image/") and len(im.data) <= 4_000_000:
+            usable.append(im)
+        if len(usable) >= 6:
+            break
+    if not usable:
+        return text
+    parts = [{"type": "text", "text": text}]
+    for im in usable:
+        b64 = base64.b64encode(im.data).decode()
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{im.mime};base64,{b64}"},
+        })
+    return parts
 
 
 def _file_user_message(file_content: str, file_meta: dict | None) -> str:
@@ -701,7 +738,7 @@ def _is_pk_target(table_name: str, columns: list[ColumnDef]) -> bool:
 def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: str | None,
          file_content: str | None, *, intent: str = "recognize", file_meta: dict | None = None,
          table_name: str = "", table_rows: list[dict] | None = None, on_progress=None,
-         session_rules: str | None = None) -> tuple[str, list[dict]]:
+         session_rules: str | None = None, sections=None) -> tuple[str, list[dict]]:
     """多轮对话：对话历史 + 可选文件内容 -> (回复文本, 结构化行数据或空)"""
     settings = db.load_model_settings()
 
@@ -713,11 +750,33 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     for m in messages:
         msgs.append({"role": m.role, "content": m.content})
 
+    last_user = ""
+    for m in reversed(messages or []):
+        if getattr(m, "role", None) == "user" and (m.content or "").strip():
+            last_user = m.content.strip()
+            break
+
     if intent == "chat":
         file_content = None
         msgs.append({"role": "user", "content": table_rows_context(table_rows, columns)})
 
-    if file_content and intent != "chat":
+    tagged_sections = None
+    vision_imgs = []
+    if sections and intent != "chat":
+        use_llm = (not settings.get("mock")) and bool((settings.get("text_model") or {}).get("api_key"))
+        file_content, used_sections, extract_mode, tagged_sections = content_for_extract(
+            sections,
+            skill_content=skill_content,
+            user_text=last_user,
+            table_name=table_name,
+            use_llm=use_llm,
+            llm_cfg=settings.get("text_model") if use_llm else None,
+        )
+        if not settings.get("mock"):
+            vision_imgs = vision_images_to_send(used_sections, extract_mode)
+        if file_meta is not None:
+            file_meta = {**file_meta, "chars": len(file_content or "")}
+    elif file_content and intent != "chat":
         focused = focus_content_for_model(file_content, skill_content)
         if focused:
             file_content = focused
@@ -727,7 +786,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     if file_content:
         chunks = split_file_chunks(file_content)
         if len(chunks) <= 1:
-            msgs.append({"role": "user", "content": _file_user_message(file_content, file_meta)})
+            msgs.append({"role": "user", "content": _file_user_payload(file_content, file_meta, vision_imgs)})
         else:
             # 分页调用；各段行原样拼接，不按业务键合并（行切分由 Skill / 模型决定）
             if settings["mock"]:
@@ -735,26 +794,29 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
                     messages, columns, file_content, skill_content,
                     intent=intent, table_name=table_name, table_rows=table_rows,
                 )
-            cfg = settings["text_model"]
+            cfg = _model_cfg_for_chat(settings, bool(vision_imgs))
             client = _client(cfg)
             chunk_results: list[tuple[str, list[dict]]] = []
             total = len(chunks)
             for i, chunk in enumerate(chunks, 1):
                 if on_progress:
                     on_progress(f"第 {i}/{total} 段识别中（共 {total} 段）")
-                piece_msgs = list(msgs) + [{
-                    "role": "user",
-                    "content": (
-                        f"[这是完整解析的第 {i}/{total} 段，按 Sheet 分页，不是截断丢弃。"
-                        f"其他段可能含封面/方法/结论；本段找不到主源就输出空数组，不要把本段当成整份报告。]\n"
-                        f"{chunk}"
-                    ),
-                }]
+                piece_text = (
+                    f"[这是完整解析的第 {i}/{total} 段，按 Sheet 分页，不是截断丢弃。"
+                    f"其他段可能含封面/方法/结论；本段找不到主源就输出空数组，不要把本段当成整份报告。]\n"
+                    f"{chunk}"
+                )
+                piece_content = (
+                    _file_user_payload(piece_text, None, vision_imgs) if i == 1 else piece_text
+                )
+                piece_msgs = list(msgs) + [{"role": "user", "content": piece_content}]
                 raw = _complete(client, cfg["model"], piece_msgs, on_progress=on_progress)
                 note, rows = _split_chat_reply(raw, columns)
                 chunk_results.append((note, rows or []))
             raw_rows = [r for _, rs in chunk_results for r in rs]
             reply = summarize_chunk_notes(chunk_results)
+            if intent == "recognize" and not raw_rows and tagged_sections:
+                return ask_user_where(tagged_sections), []
             return reply, raw_rows
 
     if settings["mock"]:
@@ -763,7 +825,7 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
             intent=intent, table_name=table_name, table_rows=table_rows,
         )
 
-    cfg = settings["text_model"]
+    cfg = _model_cfg_for_chat(settings, bool(vision_imgs))
     client = _client(cfg)
     if on_progress:
         on_progress("正在调用模型…" if intent == "chat" else "正在调用模型识别…")
@@ -771,6 +833,8 @@ def chat(messages: list[ChatMessage], columns: list[ColumnDef], skill_content: s
     reply, rows = _split_chat_reply(raw, columns)
     if intent != "recognize":
         return reply, []
+    if not rows and tagged_sections:
+        return ask_user_where(tagged_sections), []
     return reply, rows or []
 
 

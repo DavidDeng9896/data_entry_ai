@@ -58,11 +58,18 @@ def _short_parse_error(exc: BaseException) -> str:
 def _load_one_file_item(fid: str, max_chars: int) -> dict:
     try:
         label = file_parser.original_filename(fid)
+        sections = []
+        try:
+            from ..services.section_parse import parse_to_sections
+            sections = parse_to_sections(fid)
+        except Exception:
+            sections = []
         if file_parser.is_image(fid):
-            text = f"### 文件: {label}\n（已上传图片，当前以文本模式处理）"
+            text = f"### 文件: {label}\n（已上传图片，将按图片识别）"
             return {
                 "file_id": fid, "label": label, "text": text,
                 "chars": len(text), "truncated": False,
+                "sections": sections,
             }
         text = file_parser.parse_to_text(fid, max_chars=max_chars)
         wrapped = f"### 文件: {label}\n{text}"
@@ -72,6 +79,7 @@ def _load_one_file_item(fid: str, max_chars: int) -> dict:
             "text": wrapped,
             "chars": len(text),
             "truncated": "已截断" in text,
+            "sections": sections,
         }
     except FileNotFoundError as e:
         raise HTTPException(404, str(e)) from e
@@ -316,6 +324,7 @@ def _run_chat(req: ChatRequest) -> dict:
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
             session_rules=session_rules,
+            sections=item.get("sections"),
         )
         label = item.get("label") or item["file_id"]
         sk = resolved.get("skill_name") or "基线"
@@ -484,6 +493,7 @@ async def _aiter_chat_events(req: ChatRequest):
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
             session_rules=session_rules,
+            sections=item.get("sections"),
         )
 
     if n == 1:
@@ -499,6 +509,7 @@ async def _aiter_chat_events(req: ChatRequest):
             file_meta={"count": 1, "chars": item["chars"], "truncated": item["truncated"]},
             table_name=req.table_name or "",
             session_rules=session_rules,
+            sections=item.get("sections"),
         ):
             if kind == "ping":
                 yield "ping", payload
@@ -608,9 +619,16 @@ def run(req: RecognizeRequest):
         else:
             if not (file_content or "").strip():
                 return {"rows": [], "message": "未能从文件中解析出内容", **_skill_meta_payload(resolved)}
+            sections = None
+            try:
+                from ..services.section_parse import parse_to_sections
+                sections = parse_to_sections(req.file_id)
+            except Exception:
+                sections = None
             rows, message = ai_service.recognize_text(
                 file_content, req.columns, resolved.get("skill_content"),
                 table_name=getattr(req, "table_name", None) or "",
+                sections=sections,
             )
         return {"rows": rows, "message": message, **_skill_meta_payload(resolved)}
     except FileNotFoundError as e:
